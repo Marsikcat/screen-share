@@ -1918,7 +1918,8 @@ def _cli_send(args):
     if backend == "auto":
         backend = "ffmpeg" if FFMPEG_BIN.exists() else "py"
 
-    kw = dict(dest_ip=args.dest_ip, port=args.port, quality=args.quality,
+    destinations = [(args.dest_ip, args.port)]
+    kw = dict(destinations=destinations, quality=args.quality,
               window_title=args.window, log_callback=print)
     s = FfmpegSender(**kw) if backend == "ffmpeg" else PySender(**kw)
     s.start()
