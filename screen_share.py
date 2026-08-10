@@ -139,17 +139,6 @@ def get_local_ips():
                 ips.append(ip)
     except:
         pass
-    try:
-        import netifaces
-        for iface in netifaces.interfaces():
-            addrs = netifaces.ifaddresses(iface)
-            if socket.AF_INET in addrs:
-                for a in addrs[socket.AF_INET]:
-                    ip = a["addr"]
-                    if ip not in ips and ip != "127.0.0.1":
-                        ips.append(ip)
-    except ImportError:
-        pass
     ips = list(dict.fromkeys(ips))
     ips.sort(key=lambda x: (not x.startswith("26."), x))
     return ips
