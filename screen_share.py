@@ -895,15 +895,6 @@ class PyReceiver:
                 except:
                     pass
             self._ffplay_proc = None
-        if self._thread:
-            self._thread.join(timeout=2)
-        if self.sock:
-            try:
-                self.sock.close()
-            except:
-                pass
-            self.sock = None
-        self._ffplay_proc = None
         self._ffmpeg_mode = False
         if self._thread:
             self._thread.join(timeout=2)
@@ -912,6 +903,7 @@ class PyReceiver:
                 self.sock.close()
             except:
                 pass
+            self.sock = None
 
 
 # ═══════════════════════════════════════════════════════════════════
