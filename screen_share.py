@@ -1332,16 +1332,30 @@ class ScreenShareApp:
 
 
 
+    def _fwlog(self, msg):
+        """The firewall notice is shown on both screens — log to whichever is live."""
+        if self._widget_alive(getattr(self, "_host_log", None)):
+            self._hlog(msg)
+        elif self._widget_alive(getattr(self, "_join_log", None)):
+            self._jlog(msg)
+
+    @staticmethod
+    def _widget_alive(widget):
+        try:
+            return bool(widget) and bool(widget.winfo_exists())
+        except tk.TclError:
+            return False
+
     def _add_fw_rule(self):
         ok = add_firewall_rule()
         if ok:
-            if hasattr(self, "_fw_status"):
+            if self._widget_alive(getattr(self, "_fw_status", None)):
                 self._fw_status.config(text="Firewall rule added!", fg=COLOR_SUCCESS)
-            if hasattr(self, "_join_fw"):
+            if self._widget_alive(getattr(self, "_join_fw", None)):
                 self._join_fw.config(text="Firewall rule added!", fg=COLOR_SUCCESS)
-            self._hlog("Firewall rule added for port 8888 UDP")
+            self._fwlog("Firewall rule added for port 8888 UDP")
         else:
-            self._hlog("Failed to add firewall rule (run as Admin)")
+            self._fwlog("Failed to add firewall rule (run as Admin)")
 
     def _copy_ip(self, ip):
         self.root.clipboard_clear()
@@ -1356,7 +1370,10 @@ class ScreenShareApp:
 
     def _hlog(self, msg):
         # may be called from background threads (ffmpeg/relay) — marshal to the Tk thread
-        self.root.after(0, self._hlog_ui, msg)
+        try:
+            self.root.after(0, self._hlog_ui, msg)
+        except (tk.TclError, RuntimeError):
+            pass  # app is shutting down
 
     def _hlog_ui(self, msg):
         t = time.strftime("%H:%M:%S")
@@ -1365,8 +1382,8 @@ class ScreenShareApp:
             self._host_log.insert(tk.END, f"[{t}] {msg}\n")
             self._host_log.see(tk.END)
             self._host_log.config(state="disabled")
-        except tk.TclError:
-            pass
+        except (tk.TclError, AttributeError):
+            pass  # host screen was left or never opened
 
     def _preview_loop(self, monitor_index, window_title):
         self._preview_running = True
@@ -1595,7 +1612,10 @@ class ScreenShareApp:
 
     def _jlog(self, msg):
         # may be called from background threads (receiver/ffmpeg) — marshal to the Tk thread
-        self.root.after(0, self._jlog_ui, msg)
+        try:
+            self.root.after(0, self._jlog_ui, msg)
+        except (tk.TclError, RuntimeError):
+            pass  # app is shutting down
 
     def _jlog_ui(self, msg):
         t = time.strftime("%H:%M:%S")
@@ -1604,8 +1624,8 @@ class ScreenShareApp:
             self._join_log.insert(tk.END, f"[{t}] {msg}\n")
             self._join_log.see(tk.END)
             self._join_log.config(state="disabled")
-        except tk.TclError:
-            pass
+        except (tk.TclError, AttributeError):
+            pass  # join screen was left or never opened
 
     def _copy_join_log(self):
         text = self._join_log.get("1.0", tk.END).strip()
