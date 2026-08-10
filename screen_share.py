@@ -1024,20 +1024,22 @@ class ScreenShareApp:
         else:
             self._ffmpeg_status.config(text="FFmpeg: error", fg=COLOR_ERROR)
 
+    def _set_ffmpeg_status_text(self, text, ok=None):
+        try:
+            if ok is None:
+                self._ffmpeg_status.config(text=text, fg=COLOR_FG)
+            else:
+                self._ffmpeg_status.config(text=text, fg=COLOR_SUCCESS if ok else COLOR_ERROR)
+        except tk.TclError:
+            pass
+
     def _dl_ffmpeg(self):
         def log(m):
-            try:
-                self._ffmpeg_status.config(text=m, fg=COLOR_FG)
-                self.root.update()
-            except tk.TclError:
-                pass
+            self.root.after(0, self._set_ffmpeg_status_text, m)
         def task():
             ok = download_ffmpeg(log_callback=log)
-            try:
-                st = "OK" if ok else "Error"
-                self._ffmpeg_status.config(text=st, fg=COLOR_SUCCESS if ok else COLOR_ERROR)
-            except tk.TclError:
-                pass
+            st = "OK" if ok else "Error"
+            self.root.after(0, self._set_ffmpeg_status_text, st, ok)
         threading.Thread(target=task, daemon=True).start()
 
     # ── Refresh windows list ─────────────────────────────────────────
@@ -1311,6 +1313,9 @@ class ScreenShareApp:
 
     def _check_fw_async(self, label):
         st = check_firewall()
+        self.root.after(0, self._apply_fw_status, label, st)
+
+    def _apply_fw_status(self, label, st):
         try:
             if st is True:
                 label.config(text="Firewall: port 8888 open", fg=COLOR_SUCCESS)
@@ -1322,7 +1327,7 @@ class ScreenShareApp:
                 btn.pack(padx=20, pady=(0, 2), anchor="w")
             else:
                 label.config(text="Firewall: could not verify", fg="#a6adc8")
-        except:
+        except tk.TclError:
             pass
 
 
@@ -1350,11 +1355,18 @@ class ScreenShareApp:
         self._hlog("Log copied to clipboard")
 
     def _hlog(self, msg):
+        # may be called from background threads (ffmpeg/relay) — marshal to the Tk thread
+        self.root.after(0, self._hlog_ui, msg)
+
+    def _hlog_ui(self, msg):
         t = time.strftime("%H:%M:%S")
-        self._host_log.config(state="normal")
-        self._host_log.insert(tk.END, f"[{t}] {msg}\n")
-        self._host_log.see(tk.END)
-        self._host_log.config(state="disabled")
+        try:
+            self._host_log.config(state="normal")
+            self._host_log.insert(tk.END, f"[{t}] {msg}\n")
+            self._host_log.see(tk.END)
+            self._host_log.config(state="disabled")
+        except tk.TclError:
+            pass
 
     def _preview_loop(self, monitor_index, window_title):
         self._preview_running = True
@@ -1582,11 +1594,18 @@ class ScreenShareApp:
         threading.Thread(target=lambda: self._check_fw_async(self._join_fw), daemon=True).start()
 
     def _jlog(self, msg):
+        # may be called from background threads (receiver/ffmpeg) — marshal to the Tk thread
+        self.root.after(0, self._jlog_ui, msg)
+
+    def _jlog_ui(self, msg):
         t = time.strftime("%H:%M:%S")
-        self._join_log.config(state="normal")
-        self._join_log.insert(tk.END, f"[{t}] {msg}\n")
-        self._join_log.see(tk.END)
-        self._join_log.config(state="disabled")
+        try:
+            self._join_log.config(state="normal")
+            self._join_log.insert(tk.END, f"[{t}] {msg}\n")
+            self._join_log.see(tk.END)
+            self._join_log.config(state="disabled")
+        except tk.TclError:
+            pass
 
     def _copy_join_log(self):
         text = self._join_log.get("1.0", tk.END).strip()
