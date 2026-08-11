@@ -39,7 +39,7 @@ except ImportError:
     mss = None
 
 import tkinter as tk
-from tkinter import ttk, scrolledtext
+from tkinter import ttk
 
 
 # ── Config ──────────────────────────────────────────────────────────
@@ -877,7 +877,7 @@ class PyReceiver:
             self._ffplay_proc.wait()
         except Exception as e:
             if self.log:
-                self.log(f"ffplay error: {e}")
+                self.log(f"Ошибка ffplay: {e}")
         finally:
             self._ffplay_proc = None
             # signal stop to PyReceiver
@@ -910,30 +910,214 @@ class PyReceiver:
 #  GUI
 # ═══════════════════════════════════════════════════════════════════
 
-FONT = ("Segoe UI", 10)
-FONT_BIG = ("Segoe UI", 14, "bold")
-FONT_HUGE = ("Segoe UI", 28, "bold")
+# ── Design tokens (Catppuccin Mocha) ────────────────────────────────
+BASE      = "#1e1e2e"   # window background
+MANTLE    = "#181825"   # recessed areas (log, video letterbox)
+SURFACE0  = "#313244"   # cards, inputs
+SURFACE1  = "#45475a"   # borders, hover
+SURFACE2  = "#585b70"   # stronger hover
+TEXT      = "#cdd6f4"
+SUBTEXT1  = "#bac2de"
+SUBTEXT0  = "#a6adc8"   # secondary copy
+OVERLAY0  = "#6c7086"   # muted / disabled
+BLUE      = "#89b4fa"
+GREEN     = "#a6e3a1"
+RED       = "#f38ba8"
+PEACH     = "#fab387"
+YELLOW    = "#f9e2af"
+
+# Legacy aliases — kept so existing call sites keep working.
+COLOR_BG = BASE
+COLOR_FG = TEXT
+COLOR_ACCENT = BLUE
+COLOR_SUCCESS = GREEN
+COLOR_ERROR = RED
+COLOR_SURFACE = SURFACE0
+COLOR_RADMIN = PEACH
+
+FONT_FAMILY = "Segoe UI"
+FONT = (FONT_FAMILY, 10)
+FONT_SMALL = (FONT_FAMILY, 9)
+FONT_MED = (FONT_FAMILY, 11)
+FONT_BIG = (FONT_FAMILY, 14, "bold")
+FONT_HUGE = (FONT_FAMILY, 30, "bold")
+FONT_LABEL = (FONT_FAMILY, 9, "bold")   # section captions
+FONT_BTN = (FONT_FAMILY, 10, "bold")
+FONT_ACTION = (FONT_FAMILY, 13, "bold")  # primary call-to-action
 FONT_MONO = ("Consolas", 11)
-COLOR_BG = "#1e1e2e"
-COLOR_FG = "#cdd6f4"
-COLOR_ACCENT = "#89b4fa"
-COLOR_SUCCESS = "#a6e3a1"
-COLOR_ERROR = "#f38ba8"
-COLOR_SURFACE = "#313244"
-COLOR_RADMIN = "#fab387"
+FONT_MONO_SM = ("Consolas", 10)
+
+PAD = 18        # window gutter
+GAP = 10        # gap between cards
+
+# Button variants: resting bg, fg, hover bg
+BUTTON_VARIANTS = {
+    "primary": (BLUE,     BASE, "#a6c8ff"),
+    "success": (GREEN,    BASE, "#bdead9"),
+    "danger":  (RED,      BASE, "#f7a8bf"),
+    "accent":  (PEACH,    BASE, "#fcc9a4"),
+    "ghost":   (SURFACE0, TEXT, SURFACE1),
+    "subtle":  (BASE,     SUBTEXT0, SURFACE0),
+}
+
+# Text of the host button while streaming — checked by _toggle_host.
+HOST_BTN_STOP = "■  Остановить"
+HOST_BTN_START = "▶  Начать трансляцию"
 
 
 class ScreenShareApp:
     def __init__(self):
         self.root = tk.Tk()
         self.root.title(APP_NAME)
-        self.root.geometry("520x460")
-        self.root.configure(bg=COLOR_BG)
+        self.root.geometry("560x520")
+        self.root.configure(bg=BASE)
         self.root.resizable(True, True)
+        self._init_theme()
         self._center_window()
         self._build_main_menu()
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
         self._audio_proc = None
+
+    # ── Theme / widget factories ─────────────────────────────────────
+    def _init_theme(self):
+        """Style the ttk widgets — the native Windows theme ignores colours,
+        so switch to 'clam' first, which honours them."""
+        style = ttk.Style(self.root)
+        try:
+            style.theme_use("clam")
+        except tk.TclError:
+            pass
+
+        style.configure(
+            "SS.TCombobox", fieldbackground=SURFACE0, background=SURFACE0,
+            foreground=TEXT, arrowcolor=SUBTEXT0, bordercolor=SURFACE1,
+            lightcolor=SURFACE0, darkcolor=SURFACE0, insertcolor=TEXT,
+            selectbackground=SURFACE1, selectforeground=TEXT,
+            padding=(10, 7), arrowsize=14, relief="flat",
+        )
+        style.map(
+            "SS.TCombobox",
+            fieldbackground=[("readonly", SURFACE0), ("disabled", BASE)],
+            foreground=[("disabled", OVERLAY0)],
+            bordercolor=[("focus", BLUE), ("active", SURFACE2)],
+            arrowcolor=[("active", TEXT), ("disabled", OVERLAY0)],
+        )
+        # the dropdown is a plain Tk listbox and is only reachable via options
+        for opt, val in (
+            ("background", SURFACE0), ("foreground", TEXT),
+            ("selectBackground", BLUE), ("selectForeground", BASE),
+            ("borderWidth", 0),
+        ):
+            self.root.option_add(f"*TCombobox*Listbox.{opt}", val)
+
+        # drop the stepper arrows — a bare thumb reads far cleaner
+        style.layout("SS.Vertical.TScrollbar", [
+            ("Vertical.Scrollbar.trough", {"sticky": "ns", "children": [
+                ("Vertical.Scrollbar.thumb", {"expand": "1", "sticky": "nswe"}),
+            ]}),
+        ])
+        style.configure(
+            "SS.Vertical.TScrollbar", background=SURFACE1, troughcolor=MANTLE,
+            bordercolor=MANTLE, lightcolor=SURFACE1, darkcolor=SURFACE1,
+            width=8, relief="flat",
+        )
+        style.map("SS.Vertical.TScrollbar", background=[("active", SURFACE2)])
+
+        # checkbuttons sit on both the window background and on cards
+        for name, bg in (("SS.TCheckbutton", BASE), ("SS.Card.TCheckbutton", SURFACE0)):
+            style.configure(
+                name, background=bg, foreground=SUBTEXT1,
+                indicatorbackground=MANTLE, indicatorforeground=BASE,
+                bordercolor=SURFACE2, focuscolor=bg,
+                padding=(2, 4), font=FONT_SMALL,
+            )
+            style.map(
+                name,
+                background=[("active", bg)],
+                foreground=[("active", TEXT), ("disabled", OVERLAY0)],
+                indicatorforeground=[("selected", BASE)],
+                indicatorbackground=[("selected", BLUE), ("active", SURFACE1),
+                                     ("disabled", SURFACE0)],
+            )
+
+    def _post(self, fn, *args):
+        """Hand work to the Tk thread; a no-op once the app is tearing down."""
+        try:
+            self.root.after(0, fn, *args)
+        except (tk.TclError, RuntimeError):
+            pass
+
+    @staticmethod
+    def _hover(widget, rest_bg, hover_bg):
+        """Flat Tk buttons have no hover state — give them one."""
+        widget._rest_bg = rest_bg
+        widget._hover_bg = hover_bg
+        widget.bind("<Enter>", lambda e: widget.config(bg=widget._hover_bg), add="+")
+        widget.bind("<Leave>", lambda e: widget.config(bg=widget._rest_bg), add="+")
+
+    def _paint(self, button, variant):
+        """Recolour a button and keep its hover state consistent."""
+        bg, fg, hover = BUTTON_VARIANTS[variant]
+        button._rest_bg, button._hover_bg = bg, hover
+        try:
+            under_cursor = button.winfo_containing(
+                *button.winfo_pointerxy()) is button
+        except tk.TclError:
+            under_cursor = False
+        button.config(bg=hover if under_cursor else bg, fg=fg,
+                      activebackground=hover, activeforeground=fg)
+
+    def _btn(self, parent, text, command, variant="ghost", font=None,
+             padx=14, pady=7, **kw):
+        bg, fg, hover = BUTTON_VARIANTS[variant]
+        b = tk.Button(parent, text=text, command=command, font=font or FONT_BTN,
+                      bg=bg, fg=fg, activebackground=hover, activeforeground=fg,
+                      bd=0, relief=tk.FLAT, highlightthickness=0,
+                      cursor="hand2", padx=padx, pady=pady, **kw)
+        self._hover(b, bg, hover)
+        return b
+
+    def _card(self, parent, **pack_kw):
+        """A surface panel with a hairline border."""
+        outer = tk.Frame(parent, bg=SURFACE1)
+        outer.pack(**pack_kw)
+        inner = tk.Frame(outer, bg=SURFACE0)
+        inner.pack(fill=tk.BOTH, expand=True, padx=1, pady=1)
+        return inner
+
+    @staticmethod
+    def _caption(parent, text, bg, pady=(12, 6), **kw):
+        return tk.Label(parent, text=text.upper(), font=FONT_LABEL, bg=bg,
+                        fg=OVERLAY0, anchor="w", **kw)
+
+    def _make_log(self, parent, height, bg=MANTLE):
+        """Text widget + themed scrollbar (ScrolledText's own bar can't be styled)."""
+        wrap = tk.Frame(parent, bg=bg)
+        txt = tk.Text(wrap, height=height, font=FONT_MONO_SM, bg=bg, fg=SUBTEXT0,
+                      insertbackground=TEXT, bd=0, relief=tk.FLAT,
+                      highlightthickness=0, padx=10, pady=8,
+                      state="disabled", wrap="word")
+        bar = ttk.Scrollbar(wrap, orient="vertical", style="SS.Vertical.TScrollbar",
+                            command=txt.yview)
+        txt.config(yscrollcommand=bar.set)
+        bar.pack(side=tk.RIGHT, fill=tk.Y)
+        txt.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        return wrap, txt
+
+    def _ip_rows(self, parent, on_copy):
+        """Render the local IP list — Radmin addresses get a badge."""
+        for ip in get_local_ips():
+            is_radmin = ip.startswith("26.")
+            row = tk.Frame(parent, bg=SURFACE0)
+            row.pack(fill=tk.X, pady=2)
+            tk.Label(row, text=ip, font=FONT_MONO, bg=SURFACE0,
+                     fg=PEACH if is_radmin else TEXT).pack(side=tk.LEFT)
+            if is_radmin:
+                tk.Label(row, text=" RADMIN VPN ", font=(FONT_FAMILY, 8, "bold"),
+                         bg=SURFACE1, fg=PEACH).pack(side=tk.LEFT, padx=8)
+            self._btn(row, "Копировать", lambda i=ip: on_copy(i),
+                      variant="ghost", font=FONT_SMALL, padx=10, pady=3
+                      ).pack(side=tk.RIGHT)
 
     def _on_close(self):
         if self._audio_proc:
@@ -956,44 +1140,103 @@ class ScreenShareApp:
         for w in self.root.winfo_children():
             w.destroy()
 
-    def _set_window(self, w, h, title):
+    def _set_window(self, w, h, title, min_w=None, min_h=None):
         self._clear()
         self.root.geometry(f"{w}x{h}")
-        self.root.minsize(w, h)
+        self.root.minsize(min_w or w, min_h or h)
         self._center_window(w, h)
-        self.root.title(f"{APP_NAME} — {title}")
+        self.root.title(f"{APP_NAME} — {title}" if title else APP_NAME)
+
+    def _screen_header(self, title, subtitle, back_command):
+        bar = tk.Frame(self.root, bg=BASE)
+        bar.pack(fill=tk.X, padx=PAD, pady=(PAD, 4))
+        self._btn(bar, "←", back_command, variant="ghost",
+                  font=(FONT_FAMILY, 12), padx=11, pady=4).pack(side=tk.LEFT)
+        box = tk.Frame(bar, bg=BASE)
+        box.pack(side=tk.LEFT, padx=12)
+        tk.Label(box, text=title, font=FONT_BIG, bg=BASE, fg=TEXT, anchor="w"
+                 ).pack(anchor="w")
+        tk.Label(box, text=subtitle, font=FONT_SMALL, bg=BASE, fg=OVERLAY0,
+                 anchor="w").pack(anchor="w")
+        return bar
+
+    def _menu_card(self, parent, icon, title, subtitle, accent, command):
+        """A large clickable panel — the two front-door choices."""
+        outer = tk.Frame(parent, bg=SURFACE1, cursor="hand2")
+        outer.pack(fill=tk.X, pady=6)
+        stripe = tk.Frame(outer, bg=accent, width=4)
+        stripe.pack(side=tk.LEFT, fill=tk.Y)
+        body = tk.Frame(outer, bg=SURFACE0, cursor="hand2")
+        body.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 1), pady=1)
+
+        ico = tk.Label(body, text=icon, font=(FONT_FAMILY, 26), bg=SURFACE0, fg=accent)
+        ico.pack(side=tk.LEFT, padx=(18, 14), pady=16)
+        txt = tk.Frame(body, bg=SURFACE0)
+        txt.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, pady=16)
+        t1 = tk.Label(txt, text=title, font=(FONT_FAMILY, 13, "bold"),
+                      bg=SURFACE0, fg=TEXT, anchor="w")
+        t1.pack(fill=tk.X)
+        t2 = tk.Label(txt, text=subtitle, font=FONT_SMALL, bg=SURFACE0,
+                      fg=SUBTEXT0, anchor="w")
+        t2.pack(fill=tk.X, pady=(2, 0))
+        arrow = tk.Label(body, text="›", font=(FONT_FAMILY, 22), bg=SURFACE0, fg=OVERLAY0)
+        arrow.pack(side=tk.RIGHT, padx=18)
+
+        kids = (body, ico, txt, t1, t2, arrow)
+
+        def enter(_=None):
+            for w in kids:
+                w.config(bg=SURFACE1)
+            arrow.config(fg=accent)
+
+        def leave(_=None):
+            for w in kids:
+                w.config(bg=SURFACE0)
+            arrow.config(fg=OVERLAY0)
+
+        for w in (outer,) + kids:
+            w.bind("<Enter>", enter, add="+")
+            w.bind("<Leave>", leave, add="+")
+            w.bind("<Button-1>", lambda e: command(), add="+")
+        return outer
 
     def _build_main_menu(self):
-        self._set_window(520, 460, "")
-        tk.Label(self.root, text=APP_NAME, font=FONT_HUGE,
-                 bg=COLOR_BG, fg=COLOR_FG).pack(pady=(50, 5))
-        tk.Label(self.root, text="P2P демонстрация экрана через Radmin VPN / LAN",
-                 font=("Segoe UI", 10), bg=COLOR_BG, fg="#a6adc8").pack(pady=(0, 40))
+        self._set_window(560, 520, "")
 
-        btn_frame = tk.Frame(self.root, bg=COLOR_BG)
-        btn_frame.pack()
+        head = tk.Frame(self.root, bg=BASE)
+        head.pack(fill=tk.X, padx=PAD + 6, pady=(44, 0))
+        wordmark = tk.Frame(head, bg=BASE)
+        wordmark.pack()
+        tk.Label(wordmark, text=APP_NAME, font=FONT_HUGE, bg=BASE, fg=TEXT
+                 ).pack(side=tk.LEFT)
+        tk.Label(wordmark, text="●", font=(FONT_FAMILY, 16), bg=BASE, fg=BLUE
+                 ).pack(side=tk.LEFT, padx=(4, 0), pady=(14, 0))
+        tk.Label(head, text="Демонстрация экрана P2P  ·  Radmin VPN или локальная сеть",
+                 font=FONT, bg=BASE, fg=SUBTEXT0).pack(pady=(6, 0))
 
-        for text, sub, color, cmd in [
-            ("🎬 Хостить\nПоказать экран", "", COLOR_ACCENT, self._open_host),
-            ("🔗 Подключиться\nСмотреть экран", "", COLOR_SUCCESS, self._open_join),
-        ]:
-            tk.Button(btn_frame, text=text, font=FONT_BIG, width=18, height=3,
-                      bg=color, fg=COLOR_BG, activebackground=color, activeforeground=COLOR_BG,
-                      bd=0, cursor="hand2", command=cmd).pack(pady=6)
+        cards = tk.Frame(self.root, bg=BASE)
+        cards.pack(fill=tk.X, padx=PAD + 6, pady=(34, 0))
+        self._menu_card(cards, "🖥", "Хостить", "Показать свой экран другим",
+                        BLUE, self._open_host)
+        self._menu_card(cards, "👁", "Подключиться", "Смотреть чужой экран",
+                        GREEN, self._open_join)
 
-        bot = tk.Frame(self.root, bg=COLOR_BG)
-        bot.pack(side=tk.BOTTOM, fill=tk.X, padx=20, pady=20)
-
-        self._ffmpeg_status = tk.Label(
-            bot, text="", font=("Segoe UI", 9), bg=COLOR_BG, fg=COLOR_FG)
+        bot = tk.Frame(self.root, bg=BASE)
+        bot.pack(side=tk.BOTTOM, fill=tk.X, padx=PAD + 6, pady=18)
+        status_wrap = tk.Frame(bot, bg=BASE)
+        status_wrap.pack(side=tk.LEFT)
+        self._ffmpeg_dot = tk.Label(status_wrap, text="●", font=FONT_SMALL,
+                                    bg=BASE, fg=OVERLAY0)
+        self._ffmpeg_dot.pack(side=tk.LEFT, padx=(0, 6))
+        self._ffmpeg_status = tk.Label(status_wrap, text="", font=FONT_SMALL,
+                                       bg=BASE, fg=SUBTEXT0)
         self._ffmpeg_status.pack(side=tk.LEFT)
 
         self._update_ffmpeg_status()
 
         if not FFMPEG_BIN.exists():
-            tk.Button(bot, text="Скачать FFmpeg", font=("Segoe UI", 9),
-                      bg=COLOR_SURFACE, fg=COLOR_FG, bd=0, cursor="hand2",
-                      command=self._dl_ffmpeg).pack(side=tk.RIGHT)
+            self._btn(bot, "Скачать FFmpeg", self._dl_ffmpeg, variant="primary",
+                      font=FONT_SMALL, padx=12, pady=5).pack(side=tk.RIGHT)
 
     def _get_ffmpeg_info(self):
         if not FFMPEG_BIN.exists():
@@ -1015,14 +1258,18 @@ class ScreenShareApp:
     def _update_ffmpeg_status(self):
         ver, info = self._get_ffmpeg_info()
         if ver:
-            ver_short = ver.split("ffmpeg")[-1].strip().split()[0] if ver else ""
-            self._ffmpeg_status.config(
-                text=f"FFmpeg {ver_short} ({info})",
-                fg=COLOR_SUCCESS)
+            # "ffmpeg version 8.1.1-essentials_build-www.gyan.dev Copyright..."
+            m = re.search(r"version\s+(\S+)", ver)
+            ver_short = m.group(1).split("-")[0] if m else "?"
+            badge = "аппаратное ускорение" if info == "NVENC" else "только CPU"
+            text, color = f"FFmpeg {ver_short}  ·  {badge}", GREEN
         elif info == "FFmpeg not found":
-            self._ffmpeg_status.config(text="FFmpeg not found (recommended)", fg=COLOR_ERROR)
+            text, color = "FFmpeg не установлен — нажмите «Скачать»", RED
         else:
-            self._ffmpeg_status.config(text="FFmpeg: error", fg=COLOR_ERROR)
+            text, color = "FFmpeg: ошибка запуска", RED
+        self._ffmpeg_status.config(text=text, fg=SUBTEXT0)
+        if self._widget_alive(getattr(self, "_ffmpeg_dot", None)):
+            self._ffmpeg_dot.config(fg=color)
 
     def _set_ffmpeg_status_text(self, text, ok=None):
         try:
@@ -1035,11 +1282,11 @@ class ScreenShareApp:
 
     def _dl_ffmpeg(self):
         def log(m):
-            self.root.after(0, self._set_ffmpeg_status_text, m)
+            self._post(self._set_ffmpeg_status_text, m)
         def task():
             ok = download_ffmpeg(log_callback=log)
-            st = "OK" if ok else "Error"
-            self.root.after(0, self._set_ffmpeg_status_text, st, ok)
+            self._post(self._set_ffmpeg_status_text,
+                       "FFmpeg установлен" if ok else "Не удалось скачать", ok)
         threading.Thread(target=task, daemon=True).start()
 
     # ── Refresh windows list ─────────────────────────────────────────
@@ -1069,145 +1316,143 @@ class ScreenShareApp:
 
     # ── Host ─────────────────────────────────────────────────────────
     def _open_host(self):
-        self._set_window(720, 800, "Хостинг")
+        self._set_window(780, 880, "Хостинг", min_w=680, min_h=640)
         self._host_sender = None
         self._preview_running = False
+        self._dest_ips = []
 
-        top = tk.Frame(self.root, bg=COLOR_BG)
-        top.pack(fill=tk.X, padx=20, pady=(15, 0))
-        tk.Button(top, text="← Назад", font=FONT, bg=COLOR_SURFACE, fg=COLOR_FG,
-                  bd=0, cursor="hand2", command=self._build_main_menu).pack(side=tk.LEFT)
-        tk.Label(top, text="Хостинг (отправка)", font=FONT_BIG, bg=COLOR_BG, fg=COLOR_FG
-                 ).pack(side=tk.LEFT, padx=15)
+        self._screen_header("Хостинг", "Вы показываете свой экран",
+                            self._build_main_menu)
 
-        # my IP (to share with receiver)
-        ipf = tk.Frame(self.root, bg=COLOR_SURFACE, highlightbackground="#45475a",
-                       highlightthickness=1)
-        ipf.pack(fill=tk.X, padx=20, pady=8)
-        tk.Label(ipf, text="Ваш IP (скиньте получателю):", font=FONT,
-                 bg=COLOR_SURFACE, fg="#a6adc8").pack(padx=15, pady=(6, 0), anchor="w")
-        for ip in get_local_ips():
-            row = tk.Frame(ipf, bg=COLOR_SURFACE)
-            row.pack(fill=tk.X, padx=15, pady=1)
-            is_radmin = ip.startswith("26.")
-            tk.Label(row, text=f"  {ip}{'  Radmin VPN' if is_radmin else ''}",
-                     font=FONT_MONO, bg=COLOR_SURFACE,
-                     fg=COLOR_RADMIN if is_radmin else "#a6adc8").pack(side=tk.LEFT)
-            tk.Button(row, text="Copy", font=("Segoe UI", 9),
-                      bg=COLOR_SURFACE, fg=COLOR_FG, bd=0, cursor="hand2",
-                      command=lambda i=ip: self._copy_ip(i)).pack(side=tk.RIGHT)
+        # ── your address ──────────────────────────────────────────────
+        ip_card = self._card(self.root, fill=tk.X, padx=PAD, pady=(GAP, 0))
+        inner = tk.Frame(ip_card, bg=SURFACE0)
+        inner.pack(fill=tk.X, padx=16, pady=(2, 14))
+        self._caption(inner, "Ваш адрес — передайте его зрителям", SURFACE0
+                      ).pack(fill=tk.X, pady=(12, 8))
+        self._ip_rows(inner, self._copy_ip)
 
-        # receiver IP list (multi-user)
-        self._dest_ips = []  # list of IP strings
+        # ── viewers ───────────────────────────────────────────────────
+        v_card = self._card(self.root, fill=tk.X, padx=PAD, pady=(GAP, 0))
+        vin = tk.Frame(v_card, bg=SURFACE0)
+        vin.pack(fill=tk.X, padx=16, pady=(2, 14))
+        self._viewers_caption = self._caption(vin, "Зрители", SURFACE0)
+        self._viewers_caption.pack(fill=tk.X, pady=(12, 8))
 
-        rf = tk.LabelFrame(self.root, text=" Viewers (receiver IPs)", font=FONT,
-                           bg=COLOR_BG, fg=COLOR_FG, bd=0)
-        rf.pack(fill=tk.X, padx=20, pady=5)
+        lstf = tk.Frame(vin, bg=MANTLE)
+        lstf.pack(fill=tk.X)
+        self._dest_listbox = tk.Listbox(
+            lstf, font=FONT_MONO, bg=MANTLE, fg=TEXT, bd=0, height=4,
+            relief=tk.FLAT, highlightthickness=0, activestyle="none",
+            selectbackground=SURFACE1, selectforeground=TEXT)
+        self._dest_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True,
+                                padx=(8, 0), pady=6)
+        vbar = ttk.Scrollbar(lstf, orient="vertical", style="SS.Vertical.TScrollbar",
+                             command=self._dest_listbox.yview)
+        vbar.pack(side=tk.RIGHT, fill=tk.Y)
+        self._dest_listbox.config(yscrollcommand=vbar.set)
 
-        lstf = tk.Frame(rf, bg=COLOR_BG)
-        lstf.pack(fill=tk.X, padx=5, pady=2)
-        self._dest_listbox = tk.Listbox(lstf, font=FONT_MONO, bg=COLOR_SURFACE,
-                                        fg=COLOR_FG, bd=0, height=4, selectbackground="#45475a")
-        self._dest_listbox.pack(side=tk.LEFT, fill=tk.X, expand=True, ipady=4)
-        scroll = tk.Scrollbar(lstf, orient="vertical", command=self._dest_listbox.yview)
-        scroll.pack(side=tk.RIGHT, fill=tk.Y)
-        self._dest_listbox.config(yscrollcommand=scroll.set)
-
-        addf = tk.Frame(rf, bg=COLOR_BG)
-        addf.pack(fill=tk.X, padx=5, pady=(3, 0))
-        self._dest_entry = tk.Entry(addf, font=FONT_MONO,
-                                    bg=COLOR_SURFACE, fg=COLOR_FG, insertbackground=COLOR_FG,
-                                    bd=0, relief=tk.FLAT)
-        self._dest_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, ipady=3, padx=(0, 4))
+        addf = tk.Frame(vin, bg=SURFACE0)
+        addf.pack(fill=tk.X, pady=(8, 0))
+        entry_wrap = tk.Frame(addf, bg=SURFACE1)
+        entry_wrap.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 8))
+        self._dest_entry = tk.Entry(
+            entry_wrap, font=FONT_MONO, bg=MANTLE, fg=TEXT, insertbackground=TEXT,
+            bd=0, relief=tk.FLAT, highlightthickness=0)
+        self._dest_entry.pack(fill=tk.X, padx=1, pady=1, ipady=6, ipadx=8)
         self._dest_entry.bind("<Return>", lambda e: self._add_dest())
-        tk.Button(addf, text="Add", font=("Segoe UI", 9),
-                  bg=COLOR_ACCENT, fg=COLOR_BG, bd=0, cursor="hand2",
-                  command=self._add_dest).pack(side=tk.LEFT)
-        tk.Button(addf, text="Remove", font=("Segoe UI", 9),
-                  bg=COLOR_SURFACE, fg=COLOR_FG, bd=0, cursor="hand2",
-                  command=self._remove_dest).pack(side=tk.LEFT, padx=4)
-        tk.Button(addf, text="Paste", font=("Segoe UI", 9),
-                  bg=COLOR_SURFACE, fg=COLOR_FG, bd=0, cursor="hand2",
-                  command=self._paste_to_host).pack(side=tk.LEFT)
-        tk.Button(addf, text="Scan VPN", font=("Segoe UI", 9),
-                  bg=COLOR_RADMIN, fg=COLOR_BG, bd=0, cursor="hand2",
-                  command=self._scan_radmin).pack(side=tk.LEFT, padx=4)
+        self._btn(addf, "Добавить", self._add_dest, variant="primary",
+                  font=FONT_SMALL, padx=12, pady=6).pack(side=tk.LEFT)
+        self._btn(addf, "Удалить", self._remove_dest, font=FONT_SMALL,
+                  padx=12, pady=6).pack(side=tk.LEFT, padx=4)
+        self._btn(addf, "Вставить", self._paste_to_host, font=FONT_SMALL,
+                  padx=12, pady=6).pack(side=tk.LEFT)
+        self._btn(addf, "Найти в VPN", self._scan_radmin, variant="accent",
+                  font=FONT_SMALL, padx=12, pady=6).pack(side=tk.LEFT, padx=(4, 0))
         self._load_viewers()
+        self._update_viewers_caption()
 
-        # capture source
-        cf = tk.Frame(self.root, bg=COLOR_BG)
-        cf.pack(fill=tk.X, padx=20, pady=3)
-        tk.Label(cf, text="Захват:", font=FONT, bg=COLOR_BG, fg=COLOR_FG
-                 ).pack(side=tk.LEFT)
+        # ── source & quality ──────────────────────────────────────────
+        s_card = self._card(self.root, fill=tk.X, padx=PAD, pady=(GAP, 0))
+        sin = tk.Frame(s_card, bg=SURFACE0)
+        sin.pack(fill=tk.X, padx=16, pady=(2, 14))
+        self._caption(sin, "Что транслировать", SURFACE0).pack(fill=tk.X, pady=(12, 8))
+
+        cf = tk.Frame(sin, bg=SURFACE0)
+        cf.pack(fill=tk.X)
         self._capture_var = tk.StringVar()
-        self._capture_menu = ttk.Combobox(cf, textvariable=self._capture_var,
-                                           state="readonly", width=48, font=("Segoe UI", 9),
-                                           takefocus=0)
-        self._capture_menu.pack(side=tk.LEFT, padx=8)
-        tk.Button(cf, text="Refresh", font=("Segoe UI", 9),
-                  bg=COLOR_SURFACE, fg=COLOR_FG, bd=0, cursor="hand2",
-                  command=self._refresh_capture_list).pack(side=tk.LEFT)
+        self._capture_menu = ttk.Combobox(
+            cf, textvariable=self._capture_var, state="readonly",
+            style="SS.TCombobox", font=FONT_SMALL, takefocus=0)
+        self._capture_menu.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self._btn(cf, "⟳", self._refresh_capture_list, font=FONT_MED,
+                  padx=11, pady=5).pack(side=tk.LEFT, padx=(8, 0))
         self._refresh_capture_list()
 
-        # quality + backend
-        qf = tk.Frame(self.root, bg=COLOR_BG)
-        qf.pack(fill=tk.X, padx=20, pady=2)
-        tk.Label(qf, text="Качество:", font=FONT, bg=COLOR_BG, fg=COLOR_FG
-                 ).pack(side=tk.LEFT)
+        qf = tk.Frame(sin, bg=SURFACE0)
+        qf.pack(fill=tk.X, pady=(10, 0))
+        tk.Label(qf, text="Качество", font=FONT_SMALL, bg=SURFACE0, fg=SUBTEXT0
+                 ).pack(side=tk.LEFT, padx=(0, 8))
         self._host_quality = tk.StringVar(value="medium")
         ttk.Combobox(qf, textvariable=self._host_quality,
                      values=list(QUALITY_PRESETS.keys()), state="readonly",
-                     width=10, font=FONT).pack(side=tk.LEFT, padx=8)
+                     style="SS.TCombobox", width=9, font=FONT_SMALL,
+                     takefocus=0).pack(side=tk.LEFT)
+
+        opts = tk.Frame(qf, bg=SURFACE0)
+        opts.pack(side=tk.RIGHT)
         self._use_tcp = tk.BooleanVar(value=False)
-        tk.Checkbutton(qf, text="TCP", font=("Segoe UI", 9),
-                       variable=self._use_tcp, bg=COLOR_BG, fg="#a6adc8", selectcolor=COLOR_BG,
-                       activebackground=COLOR_BG, activeforeground=COLOR_FG,
-                       ).pack(side=tk.LEFT, padx=2)
+        ttk.Checkbutton(opts, text="TCP", variable=self._use_tcp,
+                        style="SS.Card.TCheckbutton").pack(side=tk.LEFT, padx=(0, 14))
         self._audio_loopback, self._audio_mics = list_audio_devices()
         has_sys_audio = len(self._audio_loopback) > 0
         has_any_audio = has_sys_audio or len(self._audio_mics) > 0
         self._use_audio = tk.BooleanVar(value=has_sys_audio)
-        audio_label = "Audio (System)" if has_sys_audio else "Audio (mic only)" if self._audio_mics else "Audio (n/a)"
-        tk.Checkbutton(qf, text=audio_label, font=("Segoe UI", 9),
-                       variable=self._use_audio, bg=COLOR_BG, fg="#a6adc8", selectcolor=COLOR_BG,
-                       activebackground=COLOR_BG, activeforeground=COLOR_FG,
+        audio_label = ("Звук системы" if has_sys_audio else
+                       "Звук с микрофона" if self._audio_mics else "Звук недоступен")
+        ttk.Checkbutton(opts, text=audio_label, variable=self._use_audio,
+                        style="SS.Card.TCheckbutton",
                         state="normal" if has_any_audio else "disabled"
-                        ).pack(side=tk.LEFT, padx=8)
-        # start
-        self._host_btn = tk.Button(self.root, text="Start streaming", font=FONT_BIG,
-                                   bg=COLOR_ACCENT, fg=COLOR_BG, bd=0, cursor="hand2",
-                                   command=self._toggle_host)
-        self._host_btn.pack(fill=tk.X, padx=20, pady=6)
+                        ).pack(side=tk.LEFT)
 
-        # preview
-        pf = tk.Frame(self.root, bg=COLOR_SURFACE, highlightbackground="#45475a",
-                      highlightthickness=1)
-        pf.pack(fill=tk.BOTH, padx=20, pady=(0, 4))
-        self._preview_label = tk.Label(pf, text="Preview (live)", font=("Segoe UI", 10),
-                                        bg=COLOR_SURFACE, fg="#585b70")
-        self._preview_label.pack(fill=tk.BOTH, expand=True)
+        # ── primary action ────────────────────────────────────────────
+        self._host_btn = self._btn(self.root, HOST_BTN_START, self._toggle_host,
+                                   variant="primary", font=FONT_ACTION, pady=12)
+        self._host_btn.pack(fill=tk.X, padx=PAD, pady=(14, 0))
 
-        # log
-        lf = tk.Frame(self.root, bg=COLOR_BG)
-        lf.pack(fill=tk.X, padx=20)
-        tk.Label(lf, text="Log:", font=("Segoe UI", 9),
-                 bg=COLOR_BG, fg="#a6adc8").pack(side=tk.LEFT)
-        tk.Button(lf, text="Copy", font=("Segoe UI", 9),
-                  bg=COLOR_SURFACE, fg=COLOR_FG, bd=0, cursor="hand2",
-                  command=self._copy_host_log).pack(side=tk.RIGHT)
-        self._host_log = scrolledtext.ScrolledText(
-            self.root, height=5, font=FONT_MONO, bg=COLOR_SURFACE, fg=COLOR_FG,
-            insertbackground=COLOR_FG, bd=0, padx=8, pady=8, state="disabled")
-        self._host_log.pack(fill=tk.X, padx=20, pady=(0, 8))
+        # ── bottom-anchored blocks (packed first so preview gets the rest) ──
+        fw_row = tk.Frame(self.root, bg=BASE)
+        fw_row.pack(side=tk.BOTTOM, fill=tk.X, padx=PAD, pady=(4, 10))
+        self._fw_status = tk.Label(fw_row, text="", font=FONT_SMALL,
+                                   bg=BASE, fg=OVERLAY0, anchor="w")
+        self._fw_status.pack(side=tk.LEFT)
 
-        self._hlog("Host: add viewer IPs and start")
-        self._hlog("Make sure receivers are listening (Connect mode)")
+        log_wrap, self._host_log = self._make_log(self.root, height=5)
+        log_wrap.pack(side=tk.BOTTOM, fill=tk.X, padx=PAD)
+        lf = tk.Frame(self.root, bg=BASE)
+        lf.pack(side=tk.BOTTOM, fill=tk.X, padx=PAD, pady=(GAP, 4))
+        self._caption(lf, "Журнал", BASE).pack(side=tk.LEFT)
+        self._btn(lf, "Копировать", self._copy_host_log, variant="subtle",
+                  font=FONT_SMALL, padx=10, pady=2).pack(side=tk.RIGHT)
 
-        # firewall
-        self._fw_status = tk.Label(self.root, text="", font=("Segoe UI", 9),
-                                    bg=COLOR_BG, fg=COLOR_FG)
-        self._fw_status.pack(fill=tk.X, padx=20, pady=(0, 2))
-        threading.Thread(target=lambda: self._check_fw_async(self._fw_status), daemon=True).start()
+        # ── live preview fills whatever is left ───────────────────────
+        pf = tk.Frame(self.root, bg=SURFACE1)
+        pf.pack(fill=tk.BOTH, expand=True, padx=PAD, pady=(GAP, 0))
+        self._preview_label = tk.Label(pf, text="Предпросмотр появится после старта",
+                                       font=FONT_SMALL, bg=MANTLE, fg=OVERLAY0)
+        self._preview_label.pack(fill=tk.BOTH, expand=True, padx=1, pady=1)
+
+        self._hlog("Добавьте IP зрителей и нажмите «Начать трансляцию»")
+        self._hlog("Зрители должны быть в режиме «Подключиться»")
+
+        threading.Thread(target=lambda: self._check_fw_async(self._fw_status),
+                         daemon=True).start()
+
+    def _update_viewers_caption(self):
+        if self._widget_alive(getattr(self, "_viewers_caption", None)):
+            n = len(self._dest_ips)
+            self._viewers_caption.config(
+                text=f"ЗРИТЕЛИ · {n}" if n else "ЗРИТЕЛИ · НИ ОДНОГО")
 
     def _paste_to_host(self):
         try:
@@ -1220,20 +1465,21 @@ class ScreenShareApp:
     def _select_peer(self, ip):
         self._dest_entry.delete(0, tk.END)
         self._dest_entry.insert(0, ip)
-        self._hlog(f"Selected peer: {ip} - press Add or Enter")
+        self._hlog(f"Выбран узел: {ip} — нажмите «Добавить» или Enter")
 
     def _add_dest(self):
         ip = self._dest_entry.get().strip()
         if not ip:
             return
         if ip in self._dest_ips:
-            self._hlog(f"Already added: {ip}")
+            self._hlog(f"Уже в списке: {ip}")
             return
         self._dest_ips.append(ip)
         self._dest_listbox.insert(tk.END, f"  {ip}")
         self._dest_entry.delete(0, tk.END)
         self._save_viewers()
-        self._hlog(f"Added viewer: {ip}  ({len(self._dest_ips)} total)")
+        self._update_viewers_caption()
+        self._hlog(f"Зритель добавлен: {ip}  (всего {len(self._dest_ips)})")
 
     def _remove_dest(self):
         sel = self._dest_listbox.curselection()
@@ -1243,7 +1489,8 @@ class ScreenShareApp:
         ip = self._dest_ips.pop(idx)
         self._dest_listbox.delete(idx)
         self._save_viewers()
-        self._hlog(f"Removed viewer: {ip}  ({len(self._dest_ips)} total)")
+        self._update_viewers_caption()
+        self._hlog(f"Зритель удалён: {ip}  (всего {len(self._dest_ips)})")
 
     def _save_viewers(self):
         try:
@@ -1263,70 +1510,73 @@ class ScreenShareApp:
             pass
 
     def _scan_radmin(self):
-        self._hlog("Scanning Radmin VPN network...")
+        self._hlog("Сканирую сеть Radmin VPN...")
         self.root.update()
         def scan():
             peers = scan_radmin_peers(timeout=0.5)
             if peers:
                 self.root.after(0, lambda p=peers: self._show_scan_results(p, self._select_peer))
-                self._hlog(f"Found: {', '.join(peers)}")
+                self._hlog(f"Найдено: {', '.join(peers)}")
             else:
-                self.root.after(0, lambda: self._hlog("No Radmin VPN peers found"))
+                self.root.after(0, lambda: self._hlog("Узлы Radmin VPN не найдены"))
         threading.Thread(target=scan, daemon=True).start()
 
     def _scan_for_join(self):
-        self._jlog("Scanning Radmin VPN network for hosts...")
+        self._jlog("Ищу хосты в сети Radmin VPN...")
         def scan():
             peers = scan_radmin_peers(timeout=0.5)
             if peers:
                 def show(pl):
-                    self._show_scan_results(pl, lambda ip: self._jlog(f"Host IP: {ip} - tell the host to use this"))
-                    self._jlog(f"Found peers: {', '.join(pl)}")
+                    self._show_scan_results(pl, lambda ip: self._jlog(f"Найден узел: {ip} — свой адрес передайте хосту"))
+                    self._jlog(f"Найдены узлы: {', '.join(pl)}")
                 self.root.after(0, lambda p=peers: show(p))
             else:
-                self.root.after(0, lambda: self._jlog("No hosts found on Radmin VPN"))
+                self.root.after(0, lambda: self._jlog("Хосты в сети Radmin VPN не найдены"))
         threading.Thread(target=scan, daemon=True).start()
 
     def _show_scan_results(self, peers, on_select):
         w = tk.Toplevel(self.root)
-        w.title("Radmin VPN Peers")
-        w.configure(bg=COLOR_BG)
-        w.geometry("350x300")
+        w.title("Узлы Radmin VPN")
+        w.configure(bg=BASE)
+        w.geometry("400x340")
         w.transient(self.root)
         w.grab_set()
+        w.bind("<Escape>", lambda e: w.destroy())
 
-        tk.Label(w, text="Active peers:", font=FONT_BIG,
-                 bg=COLOR_BG, fg=COLOR_FG).pack(pady=(15, 10))
+        tk.Label(w, text="Найденные узлы", font=FONT_BIG, bg=BASE, fg=TEXT
+                 ).pack(pady=(18, 2))
+        tk.Label(w, text=f"в сети найдено: {len(peers)}", font=FONT_SMALL,
+                 bg=BASE, fg=OVERLAY0).pack(pady=(0, 14))
 
         for ip in peers:
-            f = tk.Frame(w, bg=COLOR_SURFACE)
-            f.pack(fill=tk.X, padx=20, pady=2)
-            tk.Label(f, text=f"  {ip}", font=FONT_MONO, bg=COLOR_SURFACE,
-                     fg=COLOR_RADMIN).pack(side=tk.LEFT, pady=4)
-            tk.Button(f, text="Select", font=("Segoe UI", 9),
-                      bg=COLOR_ACCENT, fg=COLOR_BG, bd=0, cursor="hand2",
-                      command=lambda i=ip, w=w: (on_select(i), w.destroy())
-                      ).pack(side=tk.RIGHT, padx=4)
+            outer = tk.Frame(w, bg=SURFACE1)
+            outer.pack(fill=tk.X, padx=PAD, pady=3)
+            f = tk.Frame(outer, bg=SURFACE0)
+            f.pack(fill=tk.X, padx=1, pady=1)
+            tk.Label(f, text=ip, font=FONT_MONO, bg=SURFACE0, fg=PEACH
+                     ).pack(side=tk.LEFT, padx=12, pady=8)
+            self._btn(f, "Выбрать",
+                      lambda i=ip, win=w: (on_select(i), win.destroy()),
+                      variant="primary", font=FONT_SMALL, padx=12, pady=4
+                      ).pack(side=tk.RIGHT, padx=8)
 
-        tk.Button(w, text="Close", font=FONT, bg=COLOR_SURFACE, fg=COLOR_FG,
-                  bd=0, command=w.destroy).pack(pady=10)
+        self._btn(w, "Закрыть", w.destroy, variant="ghost").pack(pady=14)
 
     def _check_fw_async(self, label):
         st = check_firewall()
-        self.root.after(0, self._apply_fw_status, label, st)
+        self._post(self._apply_fw_status, label, st)
 
     def _apply_fw_status(self, label, st):
         try:
             if st is True:
-                label.config(text="Firewall: port 8888 open", fg=COLOR_SUCCESS)
+                label.config(text="✓  Брандмауэр: порт 8888 открыт", fg=GREEN)
             elif st is False:
-                label.config(text="Firewall: port 8888 blocked", fg=COLOR_ERROR)
-                btn = tk.Button(self.root, text="Add rule", font=("Segoe UI", 9),
-                                bg=COLOR_ERROR, fg=COLOR_BG, bd=0, cursor="hand2",
-                                command=self._add_fw_rule)
-                btn.pack(padx=20, pady=(0, 2), anchor="w")
+                label.config(text="✕  Брандмауэр: порт 8888 закрыт", fg=RED)
+                self._btn(label.master, "Добавить правило", self._add_fw_rule,
+                          variant="danger", font=FONT_SMALL, padx=12, pady=3
+                          ).pack(side=tk.LEFT, padx=(12, 0))
             else:
-                label.config(text="Firewall: could not verify", fg="#a6adc8")
+                label.config(text="—  Брандмауэр: проверить не удалось", fg=OVERLAY0)
         except tk.TclError:
             pass
 
@@ -1353,27 +1603,24 @@ class ScreenShareApp:
                 self._fw_status.config(text="Firewall rule added!", fg=COLOR_SUCCESS)
             if self._widget_alive(getattr(self, "_join_fw", None)):
                 self._join_fw.config(text="Firewall rule added!", fg=COLOR_SUCCESS)
-            self._fwlog("Firewall rule added for port 8888 UDP")
+            self._fwlog("Правило брандмауэра добавлено для UDP-порта 8888")
         else:
-            self._fwlog("Failed to add firewall rule (run as Admin)")
+            self._fwlog("Не удалось добавить правило (нужны права администратора)")
 
     def _copy_ip(self, ip):
         self.root.clipboard_clear()
         self.root.clipboard_append(ip)
-        self._hlog(f"IP {ip} copied")
+        self._hlog(f"Адрес {ip} скопирован")
 
     def _copy_host_log(self):
         text = self._host_log.get("1.0", tk.END).strip()
         self.root.clipboard_clear()
         self.root.clipboard_append(text)
-        self._hlog("Log copied to clipboard")
+        self._hlog("Журнал скопирован в буфер обмена")
 
     def _hlog(self, msg):
         # may be called from background threads (ffmpeg/relay) — marshal to the Tk thread
-        try:
-            self.root.after(0, self._hlog_ui, msg)
-        except (tk.TclError, RuntimeError):
-            pass  # app is shutting down
+        self._post(self._hlog_ui, msg)
 
     def _hlog_ui(self, msg):
         t = time.strftime("%H:%M:%S")
@@ -1427,28 +1674,33 @@ class ScreenShareApp:
         except:
             pass
 
+    def _reset_host_button(self):
+        self._host_btn.config(text=HOST_BTN_START)
+        self._paint(self._host_btn, "primary")
+        self._preview_label.imgtk = None
+        self._preview_label.config(image="", fg=OVERLAY0,
+                                   text="Предпросмотр появится после старта")
+
     def _toggle_host(self):
         if self._host_sender and self._host_sender.running:
             self._preview_running = False
             try:
                 self._host_sender.stop()
             except Exception as e:
-                self._hlog(f"Stop error: {e}")
+                self._hlog(f"Ошибка остановки: {e}")
             self._host_sender = None
-            self._host_btn.config(text="▶ Start streaming", bg=COLOR_ACCENT)
-            self._preview_label.config(image="", text="Preview", fg="#585b70")
-            self._hlog("Streaming stopped")
+            self._reset_host_button()
+            self._hlog("Трансляция остановлена")
             return
 
         # fallback: if sender is somehow lost but button says "Stop", stop anyway
-        if self._host_btn.cget("text") == "■ Stop":
-            self._hlog("Sender already stopped, resetting UI")
-            self._host_btn.config(text="▶ Start streaming", bg=COLOR_ACCENT)
-            self._preview_label.config(image="", text="Preview", fg="#585b70")
+        if self._host_btn.cget("text") == HOST_BTN_STOP:
+            self._hlog("Отправитель уже остановлен, сбрасываю интерфейс")
+            self._reset_host_button()
             return
 
         if not self._dest_ips:
-            self._hlog("Add at least one viewer IP first")
+            self._hlog("Сначала добавьте хотя бы одного зрителя")
             return
 
         destinations = [(ip, DEFAULT_PORT) for ip in self._dest_ips]
@@ -1469,10 +1721,10 @@ class ScreenShareApp:
 
         # choose backend (FFmpeg only)
         if not FFMPEG_BIN.exists():
-            self._hlog("FFmpeg not found. Run setup.bat first.")
+            self._hlog("FFmpeg не найден. Сначала запустите setup.bat")
             return
         if len(destinations) == 0:
-            self._hlog("No viewers added")
+            self._hlog("Список зрителей пуст")
             return
         kill_ffmpeg()
         use_tcp = self._use_tcp.get()
@@ -1480,11 +1732,11 @@ class ScreenShareApp:
         q_preset = QUALITY_PRESETS[quality]
         fps = int(q_preset["fps"])
         has_nvenc = _probe_nvenc()
-        self._hlog(f"FFmpeg{' (NVENC)' if has_nvenc else ' (CPU)'} | {fps} FPS | {proto}")
+        self._hlog(f"FFmpeg{' (NVENC)' if has_nvenc else ' (CPU)'}  ·  {fps} FPS  ·  {proto}")
         if window_title:
-            self._hlog(f"Window: \"{window_title}\"")
+            self._hlog(f"Окно: «{window_title}»")
         elif monitor_index is not None:
-            self._hlog(f"Monitor {monitor_index}")
+            self._hlog(f"Монитор {monitor_index}")
         self._host_sender = FfmpegSender(
             destinations, quality, window_title=window_title,
             monitor_index=monitor_index, log_callback=self._hlog,
@@ -1493,7 +1745,8 @@ class ScreenShareApp:
                        (self._audio_mics[0] if self._audio_mics else None))
 
         self._host_sender.start()
-        self._host_btn.config(text="■ Stop", bg=COLOR_ERROR)
+        self._host_btn.config(text=HOST_BTN_STOP)
+        self._paint(self._host_btn, "danger")
 
         # start preview thread (works with both backends)
         t = threading.Thread(target=self._preview_loop,
@@ -1502,120 +1755,116 @@ class ScreenShareApp:
 
     # ── Join ─────────────────────────────────────────────────────────
     def _open_join(self):
-        self._set_window(900, 700, "Подключение")
+        self._set_window(960, 780, "Подключение", min_w=720, min_h=560)
         self._join_receiver = None
         self._current_frame = None
         self._ffplay_active = False
+        self._fullscreen_win = None
 
-        top = tk.Frame(self.root, bg=COLOR_BG)
-        top.pack(fill=tk.X, padx=15, pady=(10, 0))
-        tk.Button(top, text="← Назад", font=FONT, bg=COLOR_SURFACE, fg=COLOR_FG,
-                  bd=0, cursor="hand2", command=self._stop_join_and_back).pack(side=tk.LEFT)
-        tk.Label(top, text="Connect (receive)", font=FONT_BIG, bg=COLOR_BG, fg=COLOR_FG
-                 ).pack(side=tk.LEFT, padx=10)
+        self._screen_header("Подключение", "Вы смотрите чужой экран",
+                            self._stop_join_and_back)
 
-        # show my IP (send this to host)
-        ipf = tk.Frame(self.root, bg=COLOR_SURFACE, highlightbackground="#45475a",
-                       highlightthickness=1)
-        ipf.pack(fill=tk.X, padx=15, pady=8)
-        tk.Label(ipf, text="Your IP (send to host):", font=FONT,
-                 bg=COLOR_SURFACE, fg="#a6adc8").pack(padx=12, pady=(6, 0), anchor="w")
-        for ip in get_local_ips():
-            row = tk.Frame(ipf, bg=COLOR_SURFACE)
-            row.pack(fill=tk.X, padx=12, pady=1)
-            is_radmin = ip.startswith("26.")
-            tk.Label(row, text=f"  {ip}{'  Radmin VPN' if is_radmin else ''}",
-                     font=FONT_MONO, bg=COLOR_SURFACE,
-                     fg=COLOR_RADMIN if is_radmin else "#a6adc8").pack(side=tk.LEFT)
-            tk.Button(row, text="Copy", font=("Segoe UI", 9),
-                      bg=COLOR_SURFACE, fg=COLOR_FG, bd=0, cursor="hand2",
-                      command=lambda i=ip: self._jcopy_ip(i)).pack(side=tk.RIGHT)
-        tk.Button(ipf, text="Scan VPN network for hosts", font=("Segoe UI", 9),
-                  bg=COLOR_RADMIN, fg=COLOR_BG, bd=0, cursor="hand2",
-                  command=lambda: self._scan_for_join()).pack(padx=12, pady=(4, 6), anchor="w")
+        # ── your address ──────────────────────────────────────────────
+        ip_card = self._card(self.root, fill=tk.X, padx=PAD, pady=(GAP, 0))
+        inner = tk.Frame(ip_card, bg=SURFACE0)
+        inner.pack(fill=tk.X, padx=16, pady=(2, 14))
+        head = tk.Frame(inner, bg=SURFACE0)
+        head.pack(fill=tk.X, pady=(12, 8))
+        self._caption(head, "Ваш адрес — передайте его хосту", SURFACE0
+                      ).pack(side=tk.LEFT)
+        self._btn(head, "Найти хосты в VPN", self._scan_for_join, variant="accent",
+                  font=FONT_SMALL, padx=12, pady=4).pack(side=tk.RIGHT)
+        self._ip_rows(inner, self._jcopy_ip)
 
-        # listening status + start/stop
-        ffmpeg_frame = tk.Frame(self.root, bg=COLOR_BG)
-        ffmpeg_frame.pack(fill=tk.X, padx=15)
+        # ── controls ──────────────────────────────────────────────────
+        ctl = tk.Frame(self.root, bg=BASE)
+        ctl.pack(fill=tk.X, padx=PAD, pady=(GAP, 0))
         self._join_use_tcp = tk.BooleanVar(value=False)
-        tk.Checkbutton(ffmpeg_frame, text="TCP",
-                       variable=self._join_use_tcp, font=("Segoe UI", 9),
-                       bg=COLOR_BG, fg="#a6adc8", selectcolor=COLOR_BG,
-                       activebackground=COLOR_BG, activeforeground=COLOR_FG,
-                       ).pack(side=tk.LEFT)
+        ttk.Checkbutton(ctl, text="TCP", variable=self._join_use_tcp,
+                        style="SS.TCheckbutton").pack(side=tk.LEFT, padx=(0, 14))
         self._join_use_audio = tk.BooleanVar(value=True)
-        tk.Checkbutton(ffmpeg_frame, text="Audio", font=("Segoe UI", 9),
-                       variable=self._join_use_audio, bg=COLOR_BG, fg="#a6adc8", selectcolor=COLOR_BG,
-                       activebackground=COLOR_BG, activeforeground=COLOR_FG).pack(side=tk.LEFT, padx=6)
+        ttk.Checkbutton(ctl, text="Звук", variable=self._join_use_audio,
+                        style="SS.TCheckbutton").pack(side=tk.LEFT)
 
-        self._join_btn = tk.Button(self.root, text="Start listening", font=FONT_BIG,
-                                   bg=COLOR_ACCENT, fg=COLOR_BG, bd=0, cursor="hand2",
-                                   command=self._toggle_join)
-        self._join_btn.pack(fill=tk.X, padx=15, pady=6)
+        pill = tk.Frame(ctl, bg=BASE)
+        pill.pack(side=tk.RIGHT)
+        self._join_dot = tk.Label(pill, text="●", font=FONT_SMALL, bg=BASE, fg=OVERLAY0)
+        self._join_dot.pack(side=tk.LEFT, padx=(0, 6))
+        self._join_status = tk.Label(pill, text="Ожидание", font=FONT_SMALL,
+                                     bg=BASE, fg=OVERLAY0)
+        self._join_status.pack(side=tk.LEFT)
 
-        # status indicator
-        self._join_status = tk.Label(self.root, text="Idle", font=FONT_MONO,
-                                     bg=COLOR_BG, fg="#585b70")
-        self._join_status.pack(fill=tk.X, padx=15, pady=(0, 4))
+        self._join_btn = self._btn(self.root, "▶  Начать приём", self._toggle_join,
+                                   variant="primary", font=FONT_ACTION, pady=12)
+        self._join_btn.pack(fill=tk.X, padx=PAD, pady=(GAP, 0))
 
-        # video
-        vf = tk.Frame(self.root, bg=COLOR_SURFACE)
-        vf.pack(fill=tk.BOTH, padx=15, pady=(0, 4), expand=True)
+        # ── bottom-anchored blocks ────────────────────────────────────
+        fw_row = tk.Frame(self.root, bg=BASE)
+        fw_row.pack(side=tk.BOTTOM, fill=tk.X, padx=PAD, pady=(4, 10))
+        self._join_fw = tk.Label(fw_row, text="", font=FONT_SMALL,
+                                 bg=BASE, fg=OVERLAY0, anchor="w")
+        self._join_fw.pack(side=tk.LEFT)
 
-        vf_top = tk.Frame(vf, bg=COLOR_SURFACE)
-        vf_top.pack(fill=tk.X)
+        log_wrap, self._join_log = self._make_log(self.root, height=4)
+        log_wrap.pack(side=tk.BOTTOM, fill=tk.X, padx=PAD)
+        lf = tk.Frame(self.root, bg=BASE)
+        lf.pack(side=tk.BOTTOM, fill=tk.X, padx=PAD, pady=(GAP, 4))
+        self._caption(lf, "Журнал", BASE).pack(side=tk.LEFT)
+        self._btn(lf, "Копировать", self._copy_join_log, variant="subtle",
+                  font=FONT_SMALL, padx=10, pady=2).pack(side=tk.RIGHT)
 
-        self._video_label = tk.Label(vf, bg=COLOR_SURFACE)
+        self._stats_var = tk.StringVar(value="FPS —   ·   кадров 0   ·   потерь 0")
+        tk.Label(self.root, textvariable=self._stats_var, font=FONT_MONO_SM,
+                 bg=BASE, fg=OVERLAY0, anchor="w"
+                 ).pack(side=tk.BOTTOM, fill=tk.X, padx=PAD, pady=(6, 0))
+
+        # ── video surface takes the rest ──────────────────────────────
+        vf = tk.Frame(self.root, bg=SURFACE1)
+        vf.pack(fill=tk.BOTH, expand=True, padx=PAD, pady=(GAP, 0))
+        stage = tk.Frame(vf, bg=MANTLE)
+        stage.pack(fill=tk.BOTH, expand=True, padx=1, pady=1)
+
+        self._video_label = tk.Label(stage, bg=MANTLE)
         self._video_label.pack(fill=tk.BOTH, expand=True)
         self._video_label.bind("<Configure>", self._on_video_resize)
         self._video_label.bind("<Double-Button-1>", lambda e: self._toggle_fullscreen())
 
-        self._fs_btn = tk.Button(vf_top, text="⛶", font=("Segoe UI", 10),
-                                  bg=COLOR_SURFACE, fg=COLOR_FG, bd=0, cursor="hand2",
-                                  command=self._toggle_fullscreen)
-        self._fs_btn.pack(side=tk.RIGHT, padx=2)
-        self._fullscreen_win = None
+        self._empty = tk.Label(
+            stage, bg=MANTLE, fg=OVERLAY0, justify="center",
+            font=(FONT_FAMILY, 11),
+            text="Скопируйте свой адрес, отправьте его хосту\n"
+                 "и нажмите «Начать приём»")
+        self._empty.place(relx=0.5, rely=0.5, anchor="center")
 
-        self._empty = tk.Label(vf,
-            text="Press 'Start listening' and send your IP to the host",
-            font=("Segoe UI", 14), bg=COLOR_SURFACE, fg="#585b70")
-        self._empty.pack(fill=tk.BOTH, expand=True)
+        self._fs_btn = self._btn(stage, "⛶", self._toggle_fullscreen,
+                                 variant="ghost", font=FONT_MED, padx=8, pady=3)
+        self._fs_btn.place(relx=1.0, rely=0.0, anchor="ne", x=-8, y=8)
 
-        # stats
-        self._stats_var = tk.StringVar(value="FPS: -- | Frames: 0 | Lost: 0 | Status: idle")
-        tk.Label(self.root, textvariable=self._stats_var,
-                 font=FONT_MONO, bg=COLOR_BG, fg="#a6adc8"
-                 ).pack(fill=tk.X, padx=15, pady=(0, 4))
+        self._jlog("1. Скопируйте свой адрес и отправьте хосту")
+        self._jlog("2. Нажмите «Начать приём» и ждите")
+        self._jlog(f"Приём на UDP-порту {DEFAULT_PORT}")
 
-        # log
-        lf = tk.Frame(self.root, bg=COLOR_BG)
-        lf.pack(fill=tk.X, padx=15)
-        tk.Label(lf, text="Log:", font=("Segoe UI", 9),
-                 bg=COLOR_BG, fg="#a6adc8").pack(side=tk.LEFT)
-        tk.Button(lf, text="Copy", font=("Segoe UI", 9),
-                  bg=COLOR_SURFACE, fg=COLOR_FG, bd=0, cursor="hand2",
-                  command=self._copy_join_log).pack(side=tk.RIGHT)
-        self._join_log = scrolledtext.ScrolledText(
-            self.root, height=4, font=FONT_MONO, bg=COLOR_SURFACE, fg=COLOR_FG,
-            insertbackground=COLOR_FG, bd=0, padx=6, pady=4, state="disabled")
-        self._join_log.pack(fill=tk.X, padx=15, pady=(0, 8))
+        threading.Thread(target=lambda: self._check_fw_async(self._join_fw),
+                         daemon=True).start()
 
-        self._jlog("1. Send your IP to the host (Copy button)")
-        self._jlog("2. Press Start listening and wait")
-        self._jlog(f"Listening on UDP port {DEFAULT_PORT}")
+    def _set_join_status(self, text, color):
+        for widget, attr in ((getattr(self, "_join_status", None), "text"),
+                             (getattr(self, "_join_dot", None), "dot")):
+            if not self._widget_alive(widget):
+                continue
+            widget.config(fg=color, **({"text": text} if attr == "text" else {}))
 
-        # firewall
-        self._join_fw = tk.Label(self.root, text="", font=("Segoe UI", 9),
-                                  bg=COLOR_BG, fg=COLOR_FG)
-        self._join_fw.pack(fill=tk.X, padx=15, pady=(0, 2))
-        threading.Thread(target=lambda: self._check_fw_async(self._join_fw), daemon=True).start()
+    def _show_empty_state(self, show):
+        if not self._widget_alive(getattr(self, "_empty", None)):
+            return
+        if show:
+            self._empty.place(relx=0.5, rely=0.5, anchor="center")
+        else:
+            self._empty.place_forget()
 
     def _jlog(self, msg):
         # may be called from background threads (receiver/ffmpeg) — marshal to the Tk thread
-        try:
-            self.root.after(0, self._jlog_ui, msg)
-        except (tk.TclError, RuntimeError):
-            pass  # app is shutting down
+        self._post(self._jlog_ui, msg)
 
     def _jlog_ui(self, msg):
         t = time.strftime("%H:%M:%S")
@@ -1631,7 +1880,7 @@ class ScreenShareApp:
         text = self._join_log.get("1.0", tk.END).strip()
         self.root.clipboard_clear()
         self.root.clipboard_append(text)
-        self._jlog("Log copied to clipboard")
+        self._jlog("Журнал скопирован в буфер обмена")
 
     def _toggle_join(self):
         if self._join_receiver and self._join_receiver.running:
@@ -1655,19 +1904,21 @@ class ScreenShareApp:
         self._join_receiver.start()
         if self._join_use_audio.get() and FFPLAY_BIN.exists():
             threading.Thread(target=self._launch_audio_player, daemon=True).start()
-        self._join_btn.config(text="Stop listening", bg=COLOR_ERROR)
-        self._join_status.config(text="Listening...", fg="#f9e2af")
-        self._empty.pack_forget()
-        self._jlog("Listening on port 8888")
-        self._jlog("Waiting for stream from host...")
-        self._jlog("Make sure host started streaming to your IP")
+        self._join_btn.config(text="■  Остановить приём")
+        self._paint(self._join_btn, "danger")
+        self._set_join_status("Слушаю порт 8888", YELLOW)
+        self._show_empty_state(False)
+        self._jlog("Приём запущен на порту 8888")
+        self._jlog("Жду поток от хоста...")
+        self._jlog("Убедитесь, что хост начал трансляцию на ваш адрес")
 
     def _launch_ffplay_tcp(self):
         kill_ffmpeg()
-        self._jlog("Starting TCP server for FFmpeg stream...")
-        self._empty.pack_forget()
-        self._join_status.config(text="Waiting for TCP connection...", fg="#f9e2af")
-        self._join_btn.config(text="Stop", bg=COLOR_ERROR)
+        self._jlog("Запускаю TCP-сервер для потока FFmpeg...")
+        self._show_empty_state(False)
+        self._set_join_status("Жду TCP-подключение", YELLOW)
+        self._join_btn.config(text="■  Остановить")
+        self._paint(self._join_btn, "danger")
         self._ffplay_tcp_proc = None
         if self._join_use_audio.get() and FFPLAY_BIN.exists():
             threading.Thread(target=self._launch_audio_player, daemon=True).start()
@@ -1677,7 +1928,7 @@ class ScreenShareApp:
     def _launch_audio_player(self):
         """Play incoming audio from host via ffplay -nodisp."""
         try:
-            self._jlog("Starting audio player...")
+            self._jlog("Запускаю аудиоплеер...")
             proc = subprocess.Popen(
                 [str(FFPLAY_BIN), "-nodisp", "-autoexit",
                  "-fflags", "nobuffer",
@@ -1688,9 +1939,9 @@ class ScreenShareApp:
             self._audio_proc = proc
             proc.wait()
         except Exception as e:
-            self._jlog(f"Audio player error: {e}")
+            self._jlog(f"Ошибка аудиоплеера: {e}")
         finally:
-            self._jlog("Audio player stopped")
+            self._jlog("Аудиоплеер остановлен")
 
     def _tcp_server_thread(self):
         server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -1700,9 +1951,9 @@ class ScreenShareApp:
             server.bind(("0.0.0.0", DEFAULT_PORT))
             server.listen(1)
             server.settimeout(1.0)
-            self.root.after(0, lambda: self._jlog(f"TCP server listening on port {DEFAULT_PORT}"))
+            self.root.after(0, lambda: self._jlog(f"TCP-сервер слушает порт {DEFAULT_PORT}"))
         except Exception as e:
-            self.root.after(0, lambda: self._jlog(f"TCP server bind error: {e}"))
+            self.root.after(0, lambda: self._jlog(f"Ошибка привязки TCP-сервера: {e}"))
             server.close()
             self._tcp_server = None
             self.root.after(0, self._stop_join)
@@ -1711,8 +1962,8 @@ class ScreenShareApp:
         while True:
             try:
                 conn, addr = server.accept()
-                self.root.after(0, lambda a=addr: self._jlog(f"TCP connected from {a[0]}:{a[1]}"))
-                self.root.after(0, lambda: self._join_status.config(text="●", fg="#a6e3a1"))
+                self.root.after(0, lambda a=addr: self._jlog(f"TCP-подключение с {a[0]}:{a[1]}"))
+                self.root.after(0, lambda: self._set_join_status("В эфире", GREEN))
             except socket.timeout:
                 if not self._join_use_tcp.get():
                     break
@@ -1732,7 +1983,7 @@ class ScreenShareApp:
                 self._ffplay_tcp_proc = ffplay
                 self.root.after(0, lambda: setattr(self, '_ffplay_active', True))
             except Exception as e:
-                self.root.after(0, lambda: self._jlog(f"ffplay error: {e}"))
+                self.root.after(0, lambda: self._jlog(f"Ошибка ffplay: {e}"))
                 conn.close()
                 continue
 
@@ -1754,8 +2005,8 @@ class ScreenShareApp:
                 except:
                     ffplay.kill()
                 self._ffplay_tcp_proc = None
-                self.root.after(0, lambda: self._jlog("TCP disconnected, waiting for reconnection..."))
-                self.root.after(0, lambda: self._join_status.config(text="Waiting for TCP connection...", fg="#f9e2af"))
+                self.root.after(0, lambda: self._jlog("TCP отключён, жду переподключения..."))
+                self.root.after(0, lambda: self._set_join_status("Жду TCP-подключение", YELLOW))
 
         server.close()
         self.root.after(0, self._stop_join)
@@ -1794,16 +2045,21 @@ class ScreenShareApp:
         if self._join_receiver:
             self._join_receiver.stop()
             self._join_receiver = None
-        self._join_btn.config(text="Start listening", bg=COLOR_ACCENT)
-        self._join_status.config(text="Idle", fg="#585b70")
-        self._stats_var.set("FPS: -- | Frames: 0 | Lost: 0 | Status: disconnected")
-        self._jlog("Disconnected")
+        self._join_btn.config(text="▶  Начать приём")
+        self._paint(self._join_btn, "primary")
+        self._set_join_status("Ожидание", OVERLAY0)
+        self._stats_var.set("FPS —   ·   кадров 0   ·   потерь 0")
         self._current_frame = None
+        if self._widget_alive(getattr(self, "_video_label", None)):
+            self._video_label.imgtk = None
+            self._video_label.config(image="")
+        self._show_empty_state(True)
+        self._jlog("Отключено")
 
     def _jcopy_ip(self, ip):
         self.root.clipboard_clear()
         self.root.clipboard_append(ip)
-        self._jlog(f"IP {ip} copied - send this to the host")
+        self._jlog(f"Адрес {ip} скопирован — отправьте его хосту")
 
     def _stop_join_and_back(self):
         self._stop_join()
@@ -1836,10 +2092,10 @@ class ScreenShareApp:
 
     def _enter_fullscreen(self):
         if self._current_frame is None:
-            self._jlog("Fullscreen: no frame yet")
+            self._jlog("Полный экран: кадров ещё нет")
             return
         w = tk.Toplevel(self.root)
-        w.title("ScreenShare — Fullscreen")
+        w.title(f"{APP_NAME} — Полный экран")
         w.configure(bg="black")
         sw = w.winfo_screenwidth()
         sh = w.winfo_screenheight()
@@ -1910,14 +2166,15 @@ class ScreenShareApp:
                 vw = max(self._video_label.winfo_width(), 100)
                 vh = max(self._video_label.winfo_height(), 100)
                 self._render_to_label(img, self._video_label, vw, vh, allow_upscale=True)
-            self._join_status.config(text="●", fg=COLOR_SUCCESS)
+            self._set_join_status("В эфире", GREEN)
         except:
             pass
 
     def _on_stats(self, stats):
         def update():
-            s = f"FPS: {stats['fps']} | Кадров: {stats['received']} | Потерь: {stats['lost']} | Статус: подключено"
-            self._stats_var.set(s)
+            self._stats_var.set(
+                f"FPS {stats['fps']}   ·   кадров {stats['received']}"
+                f"   ·   потерь {stats['lost']}")
         self.root.after(0, update)
 
     def run(self):
