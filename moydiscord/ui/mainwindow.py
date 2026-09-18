@@ -119,7 +119,7 @@ class MainWindow(QMainWindow):
         self.banner_text.setStyleSheet("font-weight: 600;")
         b.addStretch(1)
         b.addWidget(self.banner_text)
-        go = button("Подробнее", "secondary", lambda: self.open_settings("updates"))
+        go = button("Что нового", "secondary", lambda: self.open_settings("updates"))
         go.setStyleSheet("padding: 3px 12px;")
         b.addWidget(go)
         b.addStretch(1)
@@ -435,7 +435,7 @@ class MainWindow(QMainWindow):
     def _check_updates(self):
         def done(res):
             if isinstance(res, dict) and res.get("available"):
-                self.banner_text.setText(f"Доступна новая версия {res['latest']}")
+                self.banner_text.setText(f"Вышла новая версия МойДискорд {res['latest']}")
                 self.banner.show()
                 if self.tray and not self.isVisible():
                     self.tray.showMessage(APP_NAME, f"Доступна новая версия {res['latest']}",

@@ -1,4 +1,4 @@
-"""Update check and self-update from the GitHub repository."""
+"""Updates from GitHub Releases: check the latest release, download its zip, restart."""
 
 import io
 import json
@@ -7,53 +7,92 @@ import shutil
 import subprocess
 import sys
 import tempfile
-import time
+import urllib.error
 import urllib.request
 import zipfile
 from pathlib import Path
 
-from .config import BRANCH, REPO, ROOT, VERSION
+from .config import REPO, ROOT, VERSION
 
 # never touched by an update
 SKIP = {".git", ".claude", "venv", "python", "ffmpeg", "__pycache__"}
 UA = {"User-Agent": "MoyDiscord-updater"}
+API_LATEST = f"https://api.github.com/repos/{REPO}/releases/latest"
+RELEASES_PAGE = f"https://github.com/{REPO}/releases"
 
 
 def parse_version(v):
     return tuple(int(x) for x in re.findall(r"\d+", v)[:3]) or (0,)
 
 
-def _get(url, timeout=15):
-    req = urllib.request.Request(url, headers=UA)
-    with urllib.request.urlopen(req, timeout=timeout) as r:
+def asset_name(version):
+    return f"MoyDiscord-{version}.zip"
+
+
+def _get(url, timeout=15, accept=None):
+    headers = dict(UA, Accept=accept) if accept else UA
+    with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=timeout) as r:
         return r.read()
 
 
-def check():
-    """-> {current, latest, available, notes: [str], url}. Raises on network errors."""
-    latest = _get(f"https://raw.githubusercontent.com/{REPO}/{BRANCH}/VERSION?t={int(time.time())}")
-    latest = latest.decode("utf-8").strip()
-    notes = []
-    try:
-        commits = json.loads(_get(f"https://api.github.com/repos/{REPO}/commits?sha={BRANCH}&per_page=8"))
-        notes = [c["commit"]["message"].split("\n")[0] for c in commits]
-    except Exception:
-        pass
-    return {"current": VERSION, "latest": latest, "notes": notes,
+def _result(tag, **extra):
+    latest = tag.lstrip("vV")
+    return {"current": VERSION, "latest": latest, "tag": tag,
             "available": parse_version(latest) > parse_version(VERSION),
-            "url": f"https://github.com/{REPO}"}
+            "title": f"МойДискорд {latest}", "notes": "", "date": "", "size": 0,
+            "url": f"{RELEASES_PAGE}/tag/{tag}",
+            "download": f"{RELEASES_PAGE}/download/{tag}/{asset_name(latest)}", **extra}
 
 
-def apply():
-    """Download the branch archive and copy it over the app folder. Returns the new version."""
-    data = _get(f"https://github.com/{REPO}/archive/refs/heads/{BRANCH}.zip", timeout=120)
+def check():
+    """Latest release -> {current, latest, available, title, notes (Markdown), date, url, download}."""
+    try:
+        rel = json.loads(_get(API_LATEST, accept="application/vnd.github+json"))
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            raise RuntimeError("в репозитории пока нет релизов") from None
+        return _check_without_api()   # 403/429: API rate limit (60 requests/hour per IP)
+    asset = next((a for a in rel.get("assets") or [] if a["name"].lower().endswith(".zip")), None)
+    extra = {"notes": rel.get("body") or "", "date": (rel.get("published_at") or "")[:10],
+             "url": rel["html_url"]}
+    if rel.get("name"):
+        extra["title"] = rel["name"]
+    if asset:
+        extra.update(download=asset["browser_download_url"], size=asset["size"])
+    else:
+        extra["download"] = rel["zipball_url"]
+    return _result(rel["tag_name"], **extra)
+
+
+def _check_without_api():
+    """github.com/…/releases/latest redirects to …/releases/tag/<tag> and has no rate limit."""
+    req = urllib.request.Request(f"{RELEASES_PAGE}/latest", headers=UA, method="HEAD")
+    with urllib.request.urlopen(req, timeout=15) as r:
+        final = r.geturl()
+    if "/releases/tag/" not in final:
+        raise RuntimeError("в репозитории пока нет релизов")
+    return _result(final.rstrip("/").rsplit("/", 1)[-1])
+
+
+def _find_root(folder):
+    """The extracted folder that holds app.py (archives wrap everything in one top dir)."""
+    for cand in [folder, *[p for p in folder.iterdir() if p.is_dir()]]:
+        if (cand / "app.py").exists() and (cand / "moydiscord").is_dir():
+            return cand
+    raise RuntimeError("архив не похож на МойДискорд — обновление отменено")
+
+
+def apply(info=None):
+    """Download the release archive and copy it over the app folder. Returns the new version."""
+    info = info or check()
+    data = _get(info["download"], timeout=180)
+    if info.get("size") and len(data) != info["size"]:
+        raise RuntimeError("архив скачался не полностью — попробуйте ещё раз")
     tmp = Path(tempfile.mkdtemp(prefix="moydiscord-update-"))
     try:
         with zipfile.ZipFile(io.BytesIO(data)) as z:
             z.extractall(tmp)
-        top = next(tmp.iterdir())
-        if not (top / "app.py").exists() or not (top / "moydiscord").is_dir():
-            raise RuntimeError("архив не похож на МойДискорд — обновление отменено")
+        top = _find_root(tmp)
         for item in top.iterdir():
             if item.name in SKIP:
                 continue

@@ -426,38 +426,86 @@ def page_network(view, v):
 # ── updates ─────────────────────────────────────────────────────────
 def page_updates(view, v):
     s, win = view.s, view.win
+    c = T.c
     v.addWidget(label("Обновления", "h2"))
-    v.addWidget(label(f"Установлена версия {VERSION}. Обновления берутся из репозитория проекта на GitHub.",
-                      "muted", wrap=True))
-    v.addWidget(switch_row("Проверять при запуске", "Раз в запуск тихо проверять, не вышла ли новая версия.",
-                           s["check_updates"], lambda on: (s.__setitem__("check_updates", on), s.save())))
-    status = label("", "muted", wrap=True)
-    notes = label("", "hint", wrap=True)
+    v.addWidget(label(f"Установлена версия {VERSION}. Новые версии выходят как релизы на GitHub — "
+                      f"с описанием изменений и готовым архивом.", "muted", wrap=True))
+    v.addWidget(switch_row("Проверять при запуске", "Тихо проверять, не вышел ли новый релиз, и показывать "
+                           "полоску сверху, если вышел.", s["check_updates"],
+                           lambda on: (s.__setitem__("check_updates", on), s.save())))
     row = QHBoxLayout()
     check = button("Проверить сейчас", "secondary")
-    apply_btn = button("Обновить и перезапустить", "success")
+    apply_btn = button("Обновить", "success")
     apply_btn.hide()
+    releases = button("Все релизы", "link",
+                      lambda: __import__("webbrowser").open(updater.RELEASES_PAGE))
     row.addWidget(check)
     row.addWidget(apply_btn)
     row.addStretch(1)
+    row.addWidget(releases)
     v.addSpacing(16)
     v.addLayout(row)
     v.addSpacing(10)
+    status = label("", "muted", wrap=True)
     v.addWidget(status)
-    v.addWidget(notes)
+
+    card = QFrame()
+    card.setStyleSheet(f"QFrame {{ background: {c['side']}; border-radius: 8px; }}")
+    cl = QVBoxLayout(card)
+    cl.setContentsMargins(18, 14, 18, 16)
+    cl.setSpacing(6)
+    head = QHBoxLayout()
+    title = QLabel()
+    title.setStyleSheet(f"color: {c['header']}; font-weight: 700; font-size: {T.px(12)}pt;")
+    badge = QLabel()
+    date = label("", "hint")
+    head.addWidget(title)
+    head.addWidget(badge)
+    head.addStretch(1)
+    head.addWidget(date)
+    cl.addLayout(head)
+    notes = QLabel()
+    notes.setTextFormat(Qt.MarkdownText)
+    notes.setWordWrap(True)
+    notes.setOpenExternalLinks(True)
+    notes.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.LinksAccessibleByMouse)
+    cl.addWidget(notes)
+    open_page = button("Открыть релиз на GitHub", "link")
+    cl.addWidget(open_page, 0, Qt.AlignLeft)
+    card.hide()
+    v.addSpacing(8)
+    v.addWidget(card)
+    last = {}
 
     def checked(res):
         check.setEnabled(True)
         if isinstance(res, Exception):
             status.setText(f"Не удалось проверить: {res}")
             return
+        last.clear()
+        last.update(res)
         if res["available"]:
-            status.setText(f"Доступна версия {res['latest']} (у вас {res['current']}).")
+            status.setText(f"Вышла версия {res['latest']} — у вас {res['current']}.")
+            apply_btn.setText(f"Обновить до {res['latest']}")
             apply_btn.show()
+            badge.setText("НОВАЯ")
+            badge.setStyleSheet(f"background: {c['green']}; color: white; border-radius: 4px;"
+                                f"font-size: {T.px(7)}pt; font-weight: 800; padding: 1px 6px;")
         else:
             status.setText(f"У вас последняя версия ({res['current']}).")
-        if res["notes"]:
-            notes.setText("Последние изменения:\n• " + "\n• ".join(res["notes"][:6]))
+            apply_btn.hide()
+            badge.setText("УСТАНОВЛЕНА")
+            badge.setStyleSheet(f"background: {c['active']}; color: {c['text']}; border-radius: 4px;"
+                                f"font-size: {T.px(7)}pt; font-weight: 800; padding: 1px 6px;")
+        title.setText(res["title"])
+        date.setText(".".join(reversed(res["date"].split("-"))) if res["date"] else "")
+        notes.setText(res["notes"] or "_Описание не загрузилось — откройте релиз на GitHub._")
+        try:
+            open_page.clicked.disconnect()
+        except (RuntimeError, TypeError):
+            pass
+        open_page.clicked.connect(lambda: __import__("webbrowser").open(res["url"]))
+        card.show()
 
     def do_check():
         check.setEnabled(False)
@@ -469,13 +517,14 @@ def page_updates(view, v):
             apply_btn.setEnabled(True)
             status.setText(f"Не удалось обновить: {res}")
             return
-        status.setText(f"Обновлено до {res}. Перезапуск…")
+        status.setText(f"Установлена версия {res}. Перезапуск…")
         QTimer.singleShot(600, win.restart)
 
     def do_apply():
         apply_btn.setEnabled(False)
-        status.setText("Скачиваю…")
-        view._apply_bridge = run_async(updater.apply, applied)
+        status.setText(f"Скачиваю МойДискорд {last.get('latest', '')}…")
+        info = dict(last)
+        view._apply_bridge = run_async(lambda: updater.apply(info or None), applied)
 
     check.clicked.connect(do_check)
     apply_btn.clicked.connect(do_apply)
