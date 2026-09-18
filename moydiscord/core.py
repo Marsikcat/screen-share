@@ -9,11 +9,12 @@ import threading
 import time
 from pathlib import Path
 
+import iroh
 from PySide6.QtCore import QObject, QTimer, Signal
 
-from .config import CONTROL_PORT, FILES_DIR, MAX_FILE, STREAM_PORT, VERSION, VOICE_PORT
-from .net import Mesh
-from .store import Store, author_of, text_channel_name
+from .config import FILES_DIR, MAX_FILE, VERSION
+from .net import Mesh, make_invite, parse_invite
+from .store import UID_RE, Store, author_of, text_channel_name
 from .stream import StreamSender, StreamViewer
 from .voice import VoiceEngine
 
@@ -42,7 +43,9 @@ class Core(QObject):
         self.s = settings
         self.me = settings.uid
         FILES_DIR.mkdir(parents=True, exist_ok=True)
-        self.store = Store(settings.room_dir(), self.me)
+        key = iroh.SecretKey.from_bytes(bytes.fromhex(settings["secret_key"]))
+        self.store = Store(settings.room_dir(), self.me, lambda data: key.sign(data).to_bytes(),
+                           self._verify)
         self.states = {}            # uid -> state dict from the peer
         self.my_voice = None
         self.typing = {}            # channel -> {uid: expiry}
@@ -57,13 +60,14 @@ class Core(QObject):
         self.mesh.peer_down.connect(self._on_peer_down)
         self.mesh.received.connect(self._on_received)
         self.mesh.error.connect(lambda m: self.toast.emit(m, "error"))
+        self.mesh.addr_changed.connect(self._on_addr_changed)
 
-        self.voice = VoiceEngine(settings)
+        self.voice = VoiceEngine(settings, self.mesh)
         self.voice.speaking.connect(self._on_local_speaking)
         self.voice.failed.connect(lambda m: self.toast.emit(m, "error"))
-        self.sender = StreamSender()
+        self.sender = StreamSender(self.mesh)
         self.sender.stopped.connect(self._on_stream_stopped)
-        self.viewer = StreamViewer()
+        self.viewer = StreamViewer(self.mesh)
         self.viewer.closed.connect(self._on_viewer_closed)
 
         self._timer = QTimer(self, interval=1000, timeout=self._tick)
@@ -89,9 +93,16 @@ class Core(QObject):
                 "deafened": bool(self.s["deafened"]), "streaming": self.sender.running,
                 "speaking": self.voice.gate}
 
+    @staticmethod
+    def _verify(author, data, sig):
+        try:
+            iroh.EndpointId.from_bytes(bytes.fromhex(author)).verify(data, iroh.Signature.from_bytes(sig))
+            return True
+        except Exception:
+            return False
+
     def _hello_payload(self):
         return {"name": self.s["name"], "color": self.s["color"], "version": VERSION,
-                "port": CONTROL_PORT, "voice_port": VOICE_PORT, "stream_port": STREAM_PORT,
                 "state": self._my_state()}
 
     def _broadcast_state(self):
@@ -104,7 +115,7 @@ class Core(QObject):
 
     def member(self, uid):
         prof = self.store.profiles.get(uid)
-        if uid == self.me:
+        if uid in (self.me, self.s.get("legacy_uid")):     # our 2.x archive id is still us
             name, color = self.s["name"], self.s["color"]
         else:
             hello = self.mesh.peers().get(uid, {})
@@ -115,7 +126,8 @@ class Core(QObject):
                 "state": state}
 
     def members(self):
-        uids = set(self.store.profiles) | self.online()
+        # 2.x archive authors (short ids) show up in old messages, not in the member list
+        uids = {u for u in self.store.profiles if UID_RE.match(u)} | self.online()
         return sorted((self.member(u) for u in uids), key=lambda m: m["name"].lower())
 
     def name_of(self, uid):
@@ -130,6 +142,49 @@ class Core(QObject):
     def room_name(self):
         return self.store.display_room_name(self.s["room"])
 
+    # ── invites & known peers (for connecting over the internet) ─────
+    def _remember(self, uid, info):
+        if uid == self.me or not UID_RE.match(uid):
+            return
+        known = dict(self.s["known_peers"] or {})
+        old = known.get(uid, {})
+        entry = {"room": self.s.room_id(),
+                 "name": str(info.get("name") or old.get("name") or "")[:32],
+                 "relay": info.get("relay") or old.get("relay"),
+                 "addrs": [str(a) for a in (info.get("addrs") or old.get("addrs") or [])][:8]}
+        if {k: old.get(k) for k in entry} != entry:
+            entry["seen"] = int(time.time())
+            known[uid] = entry
+            self.s["known_peers"] = known       # replaced, not mutated: the network thread reads it
+            self.s.save()
+
+    def forget_peer(self, uid):
+        known = dict(self.s["known_peers"] or {})
+        if known.pop(uid, None) is not None:
+            self.s["known_peers"] = known
+            self.s.save()
+
+    def _on_addr_changed(self):
+        self.mesh.broadcast({"t": "addr", "addr": {**self.mesh.my_addr, "name": self.s["name"]}})
+
+    def create_invite(self):
+        return make_invite(self.s["room"], self.s.room_secret(), self.mesh.my_card())
+
+    def join_invite(self, code):
+        """Returns True if the app has to restart (a different room), False if we just dial."""
+        inv = parse_invite(code)
+        peer = inv["peer"]
+        if peer["id"] == self.me:
+            raise ValueError("это ваше собственное приглашение — отправьте его другу")
+        restart = inv["secret"] != self.s.room_secret().hex()
+        if restart:
+            self.s["room"], self.s["room_secret"] = inv["room"], inv["secret"]
+        self._remember(peer["id"], peer)
+        if not restart:
+            self.mesh.dial(peer["id"], peer.get("relay"), peer.get("addrs") or [])
+        self.s.save()
+        return restart
+
     def set_room_name(self, name):
         self._publish("room", name=name)
 
@@ -137,7 +192,12 @@ class Core(QObject):
     def _on_peer_up(self, uid):
         hello = self.mesh.peers().get(uid, {})
         self._set_state(uid, hello.get("state") or {})
+        self._remember(uid, {**(hello.get("addr") or {}), "name": hello.get("name")})
         self.mesh.send(uid, {"t": "vv", "v": self.store.vector()})
+        # peer exchange: whoever joins through one of us learns about everyone else
+        known = self.s["known_peers"] or {}
+        self.mesh.send(uid, {"t": "pex", "peers": {u: known[u] for u in self.mesh.peers()
+                                                   if u != uid and u in known}})
         for fid in list(self.wanted):
             self.request_file(fid)
         self.members_changed.emit()
@@ -145,7 +205,7 @@ class Core(QObject):
     def _on_peer_down(self, uid):
         self._set_state(uid, None)
         self.watchers.discard(uid)
-        self.sender.set_viewers(self._watcher_ips())
+        self.sender.set_viewers(self._watcher_uids())
         if self.viewer.uid == uid:
             self.viewer.stop()
             self.stream_changed.emit()
@@ -198,8 +258,16 @@ class Core(QObject):
             self.typing_changed.emit(cid)
         elif t == "watch":
             (self.watchers.add if msg.get("on") else self.watchers.discard)(uid)
-            self.sender.set_viewers(self._watcher_ips())
+            self.sender.set_viewers(self._watcher_uids())
             self.stream_changed.emit()
+        elif t == "pex" and isinstance(msg.get("peers"), dict):
+            for u, info in list(msg["peers"].items())[:200]:
+                if isinstance(info, dict) and UID_RE.match(str(u)) and u != self.me:
+                    self._remember(u, info)
+                    if u not in self.mesh.peers_map:
+                        self.mesh.dial(u, info.get("relay"), info.get("addrs") or [])
+        elif t == "addr" and isinstance(msg.get("addr"), dict):
+            self._remember(uid, msg["addr"])
         elif t == "file_get":
             self._serve_file(uid, str(msg.get("id", "")))
         elif t == "file":
@@ -384,12 +452,11 @@ class Core(QObject):
 
     def _update_voice_peers(self):
         if not self.my_voice:
-            self.voice.set_peers({})
+            self.voice.set_peers([])
             return
-        peers = self.mesh.peers()
-        self.voice.set_peers({u: (peers[u]["ip"], peers[u].get("voice_port", VOICE_PORT))
-                              for u, st in self.states.items()
-                              if st.get("voice") == self.my_voice and u in peers})
+        connected = self.mesh.peers_map
+        self.voice.set_peers([u for u, st in self.states.items()
+                              if st.get("voice") == self.my_voice and u in connected])
 
     def _on_local_speaking(self, on):
         self.mesh.broadcast({"t": "spk", "on": on})
@@ -408,7 +475,7 @@ class Core(QObject):
         ok = self.sender.start(source, self.s["stream_quality"], self.s["stream_encoder"],
                                self.s["stream_audio"])
         if ok:
-            self.sender.set_viewers(self._watcher_ips())
+            self.sender.set_viewers(self._watcher_uids())
             self.stream_info = f"{source['label']} · {self.sender.encoder_label}"
             self.voice.play("stream")
         self._broadcast_state()
@@ -427,10 +494,8 @@ class Core(QObject):
         self._broadcast_state()
         self.stream_changed.emit()
 
-    def _watcher_ips(self):
-        peers = self.mesh.peers()
-        return [(peers[u]["ip"], peers[u].get("stream_port", STREAM_PORT))
-                for u in self.watchers if u in peers]
+    def _watcher_uids(self):
+        return [u for u in self.watchers if u in self.mesh.peers_map]
 
     def watch(self, uid):
         if self.viewer.uid:

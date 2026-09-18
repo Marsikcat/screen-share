@@ -201,3 +201,62 @@ class ShortcutsHelp(Dialog):
         self.v.addLayout(table(hotkeys.IN_APP))
         self.v.addWidget(label("Изменить глобальные сочетания: Настройки → Горячие клавиши.", "hint"))
         self.buttons("Понятно", cancel=False)
+
+
+class InviteDialog(Dialog):
+    """Shows an invite code for the current room."""
+
+    def __init__(self, parent, core):
+        super().__init__(parent, "Пригласить друга", width=520)
+        from PySide6.QtWidgets import QApplication, QPlainTextEdit
+        code = core.create_invite()
+        self.v.addWidget(label("Отправьте этот код другу — например, в Telegram. Друг вставит его в "
+                               "«Присоединиться по коду» и попадёт в комнату «" + core.room_name() + "», "
+                               "даже если он в другом городе.", "muted", wrap=True))
+        box = QPlainTextEdit(code)
+        box.setReadOnly(True)
+        box.setFixedHeight(92)
+        box.setStyleSheet("font-family: Consolas;")
+        self.v.addWidget(box)
+        if core.s["network_mode"] != "internet":
+            self.v.addWidget(label("Сейчас включён режим «только локальная сеть» — по коду смогут "
+                                   "войти только из вашей сети.", "hint", wrap=True))
+        self.v.addWidget(label("Код открывает доступ к комнате — не публикуйте его в открытых чатах.",
+                               "hint", wrap=True))
+        ok = self.buttons("Скопировать и закрыть", cancel=False)
+        ok.clicked.connect(lambda: QApplication.clipboard().setText(code))
+
+
+class JoinDialog(Dialog):
+    """Paste an invite code: join that room (restarting if it is a different one)."""
+
+    def __init__(self, parent, core):
+        super().__init__(parent, "Присоединиться по коду", width=520)
+        from PySide6.QtWidgets import QPlainTextEdit
+        self.core, self.win = core, parent
+        self.v.addWidget(label("Вставьте код приглашения, который прислал друг.", "muted", wrap=True))
+        self.box = QPlainTextEdit()
+        self.box.setPlaceholderText("moyd:…")
+        self.box.setFixedHeight(92)
+        self.box.setStyleSheet("font-family: Consolas;")
+        self.v.addWidget(self.box)
+        self.error = label("", "hint", wrap=True)
+        self.error.setStyleSheet(f"color: {T.c['red']};")
+        self.v.addWidget(self.error)
+        ok = self.buttons("Присоединиться")
+        ok.clicked.disconnect()
+        ok.clicked.connect(self._join)
+
+    def _join(self):
+        try:
+            restart = self.core.join_invite(self.box.toPlainText())
+        except ValueError as e:
+            self.error.setText(str(e).capitalize())
+            return
+        self.accept()
+        if restart:
+            self.win.toast("Переходим в комнату из приглашения — перезапуск…")
+            from PySide6.QtCore import QTimer
+            QTimer.singleShot(800, self.win.restart)
+        else:
+            self.win.toast("Соединяемся с другом…")

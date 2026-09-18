@@ -9,8 +9,7 @@ from PySide6.QtWidgets import (QApplication, QButtonGroup, QComboBox, QFrame, QG
                                QSlider, QVBoxLayout, QWidget)
 
 from .. import hotkeys, stream, system, updater, voice
-from ..config import CONTROL_PORT, DISCOVERY_PORT, STREAM_PORT, VERSION, VOICE_PORT
-from ..net import local_ips
+from ..config import DISCOVERY_PORT, PEER_PORT, VERSION
 from . import icons
 from .settings import section, switch_row
 from .theme import T
@@ -267,8 +266,39 @@ def page_voice(view, v):
         meter.editable = vad.isChecked() and not s["vad_auto"]
     vad.toggled.connect(mode_changed)
     mode_changed()
-    v.addWidget(label("Эхоподавления нет: чтобы собеседники не слышали сами себя, используйте "
-                      "наушники.", "hint", wrap=True))
+
+    # WebRTC audio processing — the same echo canceller / denoiser as Chrome and Discord
+    v.addWidget(section("Обработка звука", "Работает на вашей стороне, до отправки: собеседники слышат "
+                        "уже очищенный голос."))
+
+    def proc(key):
+        def apply(on):
+            s[key] = on
+            s.save()
+            core.voice.rebuild_processing()
+        return apply
+    if not core.voice.processing_available():
+        v.addWidget(label("Модуль pywebrtc-audio не установлен — запустите setup.bat.", "hint", wrap=True))
+    v.addWidget(switch_row("Эхоподавление", "Убирает из микрофона звук ваших колонок — можно говорить "
+                           "без наушников.", s["aec"], proc("aec")))
+    v.addWidget(switch_row("Шумоподавление", "Гасит шум вентилятора, клавиатуры и улицы.", s["ns"], proc("ns")))
+    level_row = QHBoxLayout()
+    level_row.addWidget(label("Сила шумоподавления", "muted"))
+    level = QComboBox()
+    for i, name in enumerate(("Слабое", "Среднее", "Сильное", "Очень сильное")):
+        level.addItem(name, i)
+    level.setCurrentIndex(int(s["ns_level"]))
+
+    def level_changed():
+        s["ns_level"] = level.currentData()
+        s.save()
+        core.voice.rebuild_processing()
+    level.currentIndexChanged.connect(level_changed)
+    level_row.addWidget(level)
+    level_row.addStretch(1)
+    v.addLayout(level_row)
+    v.addWidget(switch_row("Автоматическая громкость", "Выравнивает громкость: тихий голос подтягивает, "
+                           "крик приглушает.", s["agc"], proc("agc")))
 
 
 # ── stream ──────────────────────────────────────────────────────────
@@ -318,97 +348,112 @@ def page_stream(view, v):
 
 # ── network ─────────────────────────────────────────────────────────
 def page_network(view, v):
+    from .dialogs import InviteDialog, JoinDialog
     s, core, win = view.s, view.core, view.win
+    c = T.c
     v.addWidget(label("Сеть", "h2"))
-    v.addWidget(label("Серверов нет: компьютеры находят друг друга сами — в одной локальной сети или "
-                      "в одной сети Radmin VPN. Все, у кого совпадает комната, видят общие каналы.",
+    v.addWidget(label("Серверов нет: друзья соединяются напрямую — в локальной сети, через Radmin VPN или "
+                      "через интернет. Всё зашифровано и подписано. Если напрямую пробиться не удаётся, "
+                      "трафик идёт через ретранслятор n0 — он видит только зашифрованные данные.",
                       "muted", wrap=True))
 
-    v.addWidget(section("Комната", "Меняйте, чтобы разделить разные компании друзей в одной сети. "
+    v.addWidget(section("Комната"))
+    closed = len(s["room_secret"]) == 64
+    v.addWidget(label(f"«{core.room_name()}» — " + ("закрытая: войти можно только по приглашению."
+                      if closed else "открытая: в неё попадает каждый в вашей сети, кто введёт то же "
+                      "название, а через интернет — по приглашению."), None, wrap=True))
+    row = QHBoxLayout()
+    row.addWidget(button("Пригласить друга", None, lambda: InviteDialog(win, core).exec()))
+    row.addWidget(button("Присоединиться по коду", "secondary", lambda: JoinDialog(win, core).exec()))
+    row.addStretch(1)
+    v.addSpacing(6)
+    v.addLayout(row)
+    v.addWidget(section("Открытая комната по названию", "Для компании в одной локальной сети или Radmin VPN. "
                         "После смены приложение перезапустится."))
     room = QLineEdit(s["room"])
     room.setMaxLength(32)
-    row = QHBoxLayout()
-    row.addWidget(room, 1)
+    rrow = QHBoxLayout()
+    rrow.addWidget(room, 1)
 
     def apply_room():
         name = " ".join(room.text().split())
-        if name and name != s["room"]:
-            s["room"] = name
+        if name and (name != s["room"] or s["room_secret"]):
+            s["room"], s["room_secret"] = name, ""
             s.save()
             win.restart()
-    row.addWidget(button("Сменить", "secondary", apply_room))
-    v.addLayout(row)
+    rrow.addWidget(button("Перейти", "secondary", apply_room))
+    v.addLayout(rrow)
 
-    v.addWidget(section("Ваши адреса", "Если друзья вас не видят, пусть добавят один из них вручную."))
-    for ip in local_ips():
-        r = QHBoxLayout()
-        lb = QLabel(ip + ("   · Radmin VPN" if ip.startswith("26.") else ""))
-        lb.setStyleSheet(f"color: {T.c['header']}; font-family: Consolas; font-size: {T.px(11)}pt;")
-        lb.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        copy = IconButton("copy", "Скопировать", 18, 30)
-        copy.clicked.connect(lambda _=False, x=ip: (QApplication.clipboard().setText(x),
-                                                    win.toast(f"{x} скопирован")))
-        r.addWidget(lb)
-        r.addWidget(copy)
-        r.addStretch(1)
-        v.addLayout(r)
+    v.addWidget(section("Режим сети", "После смены приложение перезапустится."))
+    group = QButtonGroup(v.parentWidget())
+    modes = (("internet", "Интернет и локальная сеть — пробивать NAT, при необходимости через ретранслятор"),
+             ("lan", "Только локальная сеть / Radmin VPN — никаких внешних сервисов"))
+    for key, text in modes:
+        rb = QRadioButton(text)
+        rb.setChecked(s["network_mode"] == key)
+        group.addButton(rb)
+        rb.toggled.connect(lambda on, k=key: on and k != s["network_mode"] and
+                           (s.__setitem__("network_mode", k), s.save(), win.restart()))
+        v.addWidget(rb)
 
-    v.addWidget(section("Участники рядом"))
+    v.addWidget(section("Участники"))
     peers = QListWidget()
-    peers.setFixedHeight(150)
+    peers.setFixedHeight(170)
 
     def fill_peers():
+        current = peers.currentItem().data(Qt.UserRole) if peers.currentItem() else None
         peers.clear()
         connected = core.mesh.peers()
+        rows = []
         for uid, p in connected.items():
-            peers.addItem(QListWidgetItem(icons.icon("signal", T.c["green"], 16),
-                                          f"{core.name_of(uid)}  —  {p['ip']}  ·  подключён"))
+            how = "через ретранслятор" if p.get("via_relay") else "напрямую"
+            rtt = f", {p['rtt']} мс" if p.get("rtt") is not None else ""
+            rows.append((uid, "signal", c["green"], f"{core.name_of(uid)}  ·  {how}{rtt}"))
         for uid, p in core.mesh.discovered().items():
             if uid not in connected:
-                peers.addItem(QListWidgetItem(icons.icon("signal", T.c["yellow"], 16),
-                                              f"{p['name'] or '?'}  —  {p['ip']}  ·  соединяемся…"))
-        if not peers.count():
-            peers.addItem("Пока никого не видно")
+                rows.append((uid, "signal", c["yellow"], f"{p['name'] or '?'}  ·  в локальной сети, соединяемся…"))
+        room = s.room_id()
+        for uid, p in (s["known_peers"] or {}).items():
+            if uid not in connected and p.get("room") == room:
+                rows.append((uid, "signal", c["muted"], f"{p.get('name') or '?'}  ·  не в сети"))
+        for uid, icon_name, color, text in rows:
+            item = QListWidgetItem(icons.icon(icon_name, color, 16), text)
+            item.setData(Qt.UserRole, uid)
+            peers.addItem(item)
+            if uid == current:
+                peers.setCurrentItem(item)
+        if not rows:
+            peers.addItem("Пока никого — пригласите друга")
     fill_peers()
-    t = QTimer(peers, interval=1500, timeout=fill_peers)
-    t.start()
+    QTimer(peers, interval=1500, timeout=fill_peers).start()
     v.addWidget(peers)
 
-    v.addWidget(section("Адреса вручную", "Для случаев, когда автоматический поиск не срабатывает "
-                        "(например, друг в другой подсети). Формат: 26.12.34.56 или 26.12.34.56:8891"))
-    manual = QListWidget()
-    manual.setFixedHeight(110)
-    for ip in s["peers"]:
-        manual.addItem(ip)
-    v.addWidget(manual)
-    add_row = QHBoxLayout()
-    entry = QLineEdit()
-    entry.setPlaceholderText("IP-адрес друга")
+    def forget():
+        item = peers.currentItem()
+        uid = item.data(Qt.UserRole) if item else None
+        if uid:
+            core.forget_peer(uid)
+            fill_peers()
+    frow = QHBoxLayout()
+    frow.addWidget(button("Забыть выбранного", "secondary", forget))
+    frow.addStretch(1)
+    v.addLayout(frow)
 
-    def add():
-        ip = entry.text().strip()
-        if ip and ip not in s["peers"]:
-            s["peers"].append(ip)
-            s.save()
-            manual.addItem(ip)
-            entry.clear()
-
-    def remove():
-        item = manual.currentItem()
-        if item and item.text() in s["peers"]:
-            s["peers"].remove(item.text())
-            s.save()
-            manual.takeItem(manual.row(item))
-    entry.returnPressed.connect(add)
-    add_row.addWidget(entry, 1)
-    add_row.addWidget(button("Добавить", None, add))
-    add_row.addWidget(button("Удалить", "secondary", remove))
-    v.addLayout(add_row)
+    v.addWidget(section("Ваш ID", "Публичный ключ: по нему вас находят и по нему проверяют подпись "
+                        "ваших сообщений."))
+    idrow = QHBoxLayout()
+    ident = QLabel(s.uid[:16] + "…" + s.uid[-8:])
+    ident.setStyleSheet(f"color: {c['header']}; font-family: Consolas; font-size: {T.px(11)}pt;")
+    copy = IconButton("copy", "Скопировать полностью", 18, 30)
+    copy.clicked.connect(lambda: (QApplication.clipboard().setText(s.uid), win.toast("ID скопирован")))
+    idrow.addWidget(ident)
+    idrow.addWidget(copy)
+    idrow.addStretch(1)
+    v.addLayout(idrow)
 
     v.addWidget(section("Брандмауэр Windows",
-                        f"Приложению нужны входящие порты: TCP {CONTROL_PORT}, UDP {DISCOVERY_PORT}, "
-                        f"{VOICE_PORT} (голос), {STREAM_PORT} (трансляция). Windows спросит подтверждение."))
+                        f"Для прямых соединений нужны входящие UDP {DISCOVERY_PORT} (поиск в локальной сети) и "
+                        f"{PEER_PORT} (всё остальное). Без них тоже работает, но чаще через ретранслятор."))
 
     def firewall():
         fw.setEnabled(False)

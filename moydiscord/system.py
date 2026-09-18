@@ -5,8 +5,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from .config import (APP_NAME, CONTROL_PORT, DISCOVERY_PORT, INSTANCE, ROOT, STREAM_PORT,
-                     VOICE_PORT)
+from .config import APP_NAME, DISCOVERY_PORT, INSTANCE, PEER_PORT, ROOT
 
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 RUN_NAME = APP_NAME + (f"-{INSTANCE}" if INSTANCE else "")
@@ -43,15 +42,11 @@ def set_autostart(enabled):
 
 def open_firewall():
     """Inbound rules for our ports. Windows shows its own UAC prompt; returns True if applied."""
-    rules = [
-        (f"{APP_NAME} UDP", "UDP", f"{STREAM_PORT},{STREAM_PORT + 1},{DISCOVERY_PORT},{VOICE_PORT}"),
-        (f"{APP_NAME} TCP", "TCP", str(CONTROL_PORT)),
-    ]
-    cmds = []
-    for name, proto, ports in rules:
-        cmds.append(f"netsh advfirewall firewall delete rule name='{name}' | Out-Null")
-        cmds.append(f"netsh advfirewall firewall add rule name='{name}' dir=in action=allow "
-                    f"protocol={proto} localport={ports} profile=any | Out-Null")
+    # 3.x: LAN discovery + iroh QUIC, both UDP. The 2.x TCP rule is removed.
+    cmds = [f"netsh advfirewall firewall delete rule name='{APP_NAME} TCP' | Out-Null",
+            f"netsh advfirewall firewall delete rule name='{APP_NAME} UDP' | Out-Null",
+            f"netsh advfirewall firewall add rule name='{APP_NAME} UDP' dir=in action=allow "
+            f"protocol=UDP localport={DISCOVERY_PORT},{PEER_PORT} profile=any | Out-Null"]
     inner = "; ".join(cmds).replace('"', '\\"')
     ps = (f"$p = Start-Process powershell -Verb RunAs -WindowStyle Hidden -Wait -PassThru "
           f"-ArgumentList '-NoProfile','-Command',\"{inner}\"; exit $p.ExitCode")

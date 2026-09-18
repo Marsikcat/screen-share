@@ -1,6 +1,7 @@
 """Paths, ports and persistent user settings."""
 
 import copy
+import hashlib
 import json
 import os
 import secrets
@@ -25,12 +26,12 @@ FFMPEG_DIR = ROOT / "ffmpeg"
 FFMPEG_BIN = FFMPEG_DIR / "ffmpeg.exe"
 FFPLAY_BIN = FFMPEG_DIR / "ffplay.exe"
 
-# Ports. 8888/8889 are the ones ScreenShare always used.
-STREAM_PORT = 8888 + _OFF          # UDP  MPEG-TS screen share, viewer side
-DISCOVERY_PORT = 8890              # UDP  peer announcements (shared by all instances)
-CONTROL_PORT = 8891 + _OFF         # TCP  chat sync, presence, signalling
-VOICE_PORT = 8892 + _OFF           # UDP  Opus voice
-STREAM_RELAY_PORT = 8895 + _OFF    # UDP  local ffmpeg -> relay fan-out (loopback only)
+# Ports. Only the first two need to be open in the firewall; the rest are loopback.
+DISCOVERY_PORT = 8890              # UDP  LAN announcements (shared by all instances)
+PEER_PORT = 8891 + _OFF            # UDP  iroh QUIC: chat sync, voice, screen share — everything
+STREAM_PORT = 8888 + _OFF          # UDP  loopback: incoming screen share -> ffplay
+STREAM_RELAY_PORT = 8895 + _OFF    # UDP  loopback: ffmpeg -> relay to viewers
+PROTOCOL = 3
 
 MAX_FILE = 25 * 1024 * 1024
 MAX_TEXT = 4000
@@ -42,7 +43,10 @@ DEFAULTS = {
     "name": "",
     "color": None,
     "room": "общая",
-    "peers": [],                # manually added IPs
+    "room_secret": "",          # hex; empty = derived from the room name (open LAN room)
+    "network_mode": "internet", # internet (relays + NAT traversal) | lan (direct only)
+    "known_peers": {},          # uid -> {name, relay, addrs, seen}: reconnect over the internet
+    "secret_key": "",           # hex ed25519 key: our identity and message signatures
     # appearance
     "theme": "dark",
     "accent": "#5865f2",
@@ -57,6 +61,10 @@ DEFAULTS = {
     "vad_threshold": -50,       # dBFS, used when vad_auto is off
     "ptt_key": 0x56,            # legacy single-key PTT, migrated into "hotkeys"
     "ptt_release_ms": 200,
+    "aec": True,                # WebRTC echo cancellation
+    "ns": True,                 # WebRTC noise suppression
+    "ns_level": 2,              # 0 low … 3 very high
+    "agc": True,                # WebRTC automatic gain control
     "muted": False,
     "deafened": False,
     "user_volumes": {},         # uid -> percent
@@ -99,8 +107,7 @@ class Settings(dict):
         self["hotkeys"] = normalized(self["hotkeys"])
         if first_time and self["ptt_key"] != DEFAULTS["ptt_key"]:
             self["hotkeys"]["ptt"] = {"vk": self["ptt_key"], "mods": []}
-        if not self.get("uid"):
-            self["uid"] = secrets.token_hex(12)
+        self._ensure_identity()
         if not self.get("color"):
             self["color"] = secrets.choice(PALETTE)
         self.save()
@@ -115,9 +122,30 @@ class Settings(dict):
         self[key] = value
         self.save()
 
+    def _ensure_identity(self):
+        """uid = our ed25519 public key (hex). 2.x used a random 24-hex uid — kept as legacy_uid."""
+        import iroh
+        uid = self.get("uid") or ""
+        if len(uid) == 24:
+            self["legacy_uid"] = uid
+        if len(self["secret_key"]) != 64:
+            self["secret_key"] = secrets.token_hex(32)
+        key = iroh.SecretKey.from_bytes(bytes.fromhex(self["secret_key"]))
+        self["uid"] = key.public().to_bytes().hex()
+
     @property
     def uid(self):
         return self["uid"]
+
+    def room_secret(self):
+        """Joining a room = knowing its secret. Named rooms derive it from the name, so friends
+        on the same LAN who type the same name meet; invite codes carry a random one."""
+        if len(self["room_secret"]) == 64:
+            return bytes.fromhex(self["room_secret"])
+        return hashlib.sha256(("moydiscord-room:" + self["room"].strip().lower()).encode()).digest()
+
+    def room_id(self):
+        return hashlib.sha256(self.room_secret()).hexdigest()[:32]
 
     def room_dir(self):
         safe = "".join(ch if ch.isalnum() else "_" for ch in self["room"].lower()) or "room"

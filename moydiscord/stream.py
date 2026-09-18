@@ -3,9 +3,11 @@ Screen share inside voice channels.
 
 Same idea as ScreenShare: FFmpeg captures (DXGI Desktop Duplication for
 monitors, GDI for windows), encodes with NVENC when available, and emits
-MPEG-TS over UDP. Here it goes to a local relay that fans out to whoever
-is watching right now, so viewers can come and go without restarting FFmpeg.
-Viewers play it with ffplay on UDP 8888.
+MPEG-TS to a local relay. The relay feeds one QUIC stream per viewer (iroh:
+lost packets are retransmitted, it works through NAT, and if a viewer's link
+can't keep up the oldest data is dropped rather than letting delay pile up),
+so viewers can come and go without restarting FFmpeg. On the viewer's side
+the stream is handed to ffplay over loopback UDP.
 """
 
 import ctypes
@@ -19,6 +21,7 @@ from PySide6.QtCore import QObject, Signal
 from .config import FFMPEG_BIN, FFPLAY_BIN, STREAM_PORT, STREAM_RELAY_PORT
 
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+TS_CHUNK = 1316                 # 7 MPEG-TS packets: what FFmpeg emits per datagram
 
 QUALITY = {
     "720p30": {"h": 720, "fps": 30, "kbps": 3500, "label": "720p · 30 FPS"},
@@ -153,10 +156,11 @@ def list_audio_devices():
 class StreamSender(QObject):
     stopped = Signal(str)       # "" when stopped on purpose, otherwise the error
 
-    def __init__(self):
+    def __init__(self, mesh):
         super().__init__()
+        self.mesh = mesh
         self.proc = None
-        self.viewers = frozenset()
+        self.outs = {}              # viewer uid -> net.OutStream
         self.running = False
         self._relay = None
         self._err_tail = []
@@ -232,9 +236,14 @@ class StreamSender(QObject):
         self.encoder_label = "NVENC" if nvenc else "CPU (x264)"
         return True
 
-    def set_viewers(self, addrs):
-        """addrs: [(ip, port)] of everyone watching right now."""
-        self.viewers = frozenset(addrs)
+    def set_viewers(self, uids):
+        """uids of everyone watching right now: open / close their streams."""
+        uids = set(uids) if self.running else set()
+        for uid in list(self.outs):
+            if uid not in uids:
+                self.outs.pop(uid).close()
+        for uid in uids - set(self.outs):
+            self.outs[uid] = self.mesh.open_stream(uid)
 
     def _relay_loop(self, relay):
         while self.running:
@@ -244,11 +253,8 @@ class StreamSender(QObject):
                 continue
             except OSError:
                 break
-            for addr in self.viewers:
-                try:
-                    relay.sendto(data, addr)
-                except OSError:
-                    pass
+            for out in list(self.outs.values()):
+                out.push(data)
 
     def _watch_proc(self, proc):
         for raw in iter(proc.stderr.readline, b""):
@@ -273,7 +279,7 @@ class StreamSender(QObject):
         if self._relay:
             self._relay.close()
             self._relay = None
-        self.viewers = frozenset()
+        self.set_viewers(())
         return was
 
 
@@ -281,21 +287,39 @@ class StreamSender(QObject):
 class StreamViewer(QObject):
     closed = Signal(str)        # uid of the streamer whose window closed
 
-    def __init__(self):
+    def __init__(self, mesh):
         super().__init__()
+        mesh.on_stream = self._on_stream
         self.proc = None
         self.uid = None
+        self._buf = b""
+        self._out = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+    def _on_stream(self, uid, chunk):
+        """Bytes of a screen share arriving over QUIC (network thread) -> ffplay on loopback."""
+        if uid != self.uid or chunk is None:
+            return
+        self._buf += chunk
+        n = len(self._buf) // TS_CHUNK * TS_CHUNK
+        for i in range(0, n, TS_CHUNK):
+            try:
+                self._out.sendto(self._buf[i:i + TS_CHUNK], ("127.0.0.1", STREAM_PORT))
+            except OSError:
+                break
+        self._buf = self._buf[n:]
 
     def watch(self, uid, title):
         self.stop()
         if not FFPLAY_BIN.exists():
             return False
         self.uid = uid
+        self._buf = b""
         self.proc = subprocess.Popen(
             [str(FFPLAY_BIN), "-hide_banner", "-loglevel", "error", "-window_title", title,
              "-x", "1280", "-y", "720", "-fflags", "nobuffer", "-flags", "low_delay",
              "-framedrop", "-max_delay", "200000",
-             "-i", f"udp://0.0.0.0:{STREAM_PORT}?overrun_nonfatal=1&fifo_size=500000&buffer_size=8388608"],
+             "-i", f"udp://127.0.0.1:{STREAM_PORT}?localaddr=127.0.0.1&overrun_nonfatal=1"
+                   f"&fifo_size=500000&buffer_size=8388608"],
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             creationflags=NO_WINDOW)
         threading.Thread(target=self._wait, args=(self.proc, uid), daemon=True).start()

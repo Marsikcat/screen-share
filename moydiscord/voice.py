@@ -1,15 +1,15 @@
 """
 Voice engine.
 
-Mic (WASAPI, 48 kHz mono, 20 ms blocks) → gate (voice activity or
-push-to-talk) → Opus → UDP straight to every peer in the same voice channel.
-Incoming Opus → per-speaker jitter buffer → mixed into the output stream,
+Mic (WASAPI, 48 kHz mono, 20 ms blocks) → WebRTC audio processing (echo
+cancellation, noise suppression, gain control — the same code as in Chrome and
+Discord) → gate (voice activity or push-to-talk) → Opus → QUIC datagrams to
+every peer in the same voice channel. Incoming Opus → per-speaker jitter buffer → mixed into the output stream,
 which also plays the UI sound effects.
 """
 
 import collections
 import math
-import socket
 import struct
 import threading
 import time
@@ -20,13 +20,16 @@ import numpy as np
 import sounddevice as sd
 from PySide6.QtCore import QObject, Signal
 
-from .config import VOICE_PORT
 from .hotkeys import held
+
+try:
+    import pywebrtc_audio as webrtc_audio
+except ImportError:            # optional: without it voice works, just unprocessed
+    webrtc_audio = None
 
 SR = 48000
 FRAME = 960                      # 20 ms
-HDR = struct.Struct("!2sBB12sI")  # magic, version, flags, sender uid, seq
-MAGIC = b"MV"
+HDR = struct.Struct("!I")         # seq; the sender is known from the QUIC connection
 HANGOVER = 15                    # frames the gate stays open after speech (300 ms)
 PREROLL = 2                      # frames sent from before the gate opened
 JITTER_START = 2                 # frames buffered before a speaker starts playing
@@ -110,14 +113,16 @@ class VoiceEngine(QObject):
     speaking = Signal(bool)      # local gate opened / closed
     failed = Signal(str)
 
-    def __init__(self, settings):
+    def __init__(self, settings, mesh):
         super().__init__()
         self.s = settings
-        self.me = bytes.fromhex(settings.uid)
-        self.sock = None
+        self.mesh = mesh
+        mesh.on_voice = self._on_voice
         self.running = False
-        self.targets = []            # [(ip, port)] we send to
+        self.targets = []            # uids we send to
         self.allowed = set()         # uids we accept audio from
+        self._apm = None             # WebRTC AudioProcessor, rebuilt when settings change
+        self._far = collections.deque(maxlen=16)   # what we played: the echo reference
         self.in_stream = None
         self.out_stream = None
         self.monitor = False         # mic test: hear yourself
@@ -140,15 +145,8 @@ class VoiceEngine(QObject):
 
     # ── lifecycle ───────────────────────────────────────────────────
     def start(self):
-        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        try:
-            self.sock.bind(("0.0.0.0", VOICE_PORT))
-        except OSError as e:
-            self.failed.emit(f"Голосовой порт {VOICE_PORT} занят: {e.strerror or e}")
-            return
-        self.sock.settimeout(0.5)
         self.running = True
-        threading.Thread(target=self._rx_loop, daemon=True).start()
+        self.rebuild_processing()
         self.restart_output()
 
     def shutdown(self):
@@ -156,8 +154,24 @@ class VoiceEngine(QObject):
         self.stop_input()
         self._close(self.out_stream)
         self.out_stream = None
-        if self.sock:
-            self.sock.close()
+
+    @staticmethod
+    def processing_available():
+        return webrtc_audio is not None
+
+    def rebuild_processing(self):
+        s = self.s
+        if webrtc_audio is None or not (s["aec"] or s["ns"] or s["agc"]):
+            self._apm = None
+            return
+        delay = 60
+        for st in (self.in_stream, self.out_stream):
+            if st is not None:
+                delay += int(st.latency * 1000)
+        self._apm = webrtc_audio.AudioProcessor(
+            sample_rate=SR, num_channels=1, echo_cancellation=bool(s["aec"]),
+            noise_suppression=bool(s["ns"]), high_pass_filter=True,
+            auto_gain_control=bool(s["agc"]), ns_level=int(s["ns_level"]), stream_delay_ms=delay)
 
     @staticmethod
     def _close(stream):
@@ -193,7 +207,9 @@ class VoiceEngine(QObject):
                 self.in_stream = sd.InputStream(
                     samplerate=SR, channels=1, dtype="int16", blocksize=FRAME,
                     device=dev, latency="low", callback=self._in_cb, extra_settings=extra)
+                self._far.clear()
                 self.in_stream.start()
+                self.rebuild_processing()
                 return True
             except Exception as e:
                 err = e
@@ -213,11 +229,11 @@ class VoiceEngine(QObject):
             self.start_input()
 
     # ── session ─────────────────────────────────────────────────────
-    def set_peers(self, peers):
-        """peers: {uid: (ip, port)} of everyone else in my voice channel."""
+    def set_peers(self, uids):
+        """uids of everyone else in my voice channel."""
         with self._lock:
-            self.targets = list(peers.values())
-            self.allowed = set(peers)
+            self.targets = list(uids)
+            self.allowed = set(uids)
             for uid in list(self._decoders):
                 if uid not in self.allowed:
                     self._decoders.pop(uid, None)
@@ -260,6 +276,16 @@ class VoiceEngine(QObject):
         if gain != 1.0:
             pcm *= gain
         np.clip(pcm, -32768, 32767, out=pcm)
+        apm = self._apm
+        if apm is not None:
+            far = self._far.popleft() if self._far else None
+            if far is None or len(far) != frames:
+                far = np.zeros(frames, np.int16)
+            try:
+                pcm = np.asarray(apm.process(pcm.astype(np.int16), far if self.s["aec"] else None),
+                                 np.float32).reshape(-1)
+            except Exception:
+                pass
         rms = math.sqrt(float(np.mean(pcm * pcm)) + 1e-9)
         self.level = level = 20 * math.log10(rms / 32768 + 1e-9)
 
@@ -291,8 +317,7 @@ class VoiceEngine(QObject):
         frame.sample_rate = SR
         frame.pts = self._seq * FRAME
         self._seq += 1
-        packets = [HDR.pack(MAGIC, 1, 0, self.me, self._seq) + bytes(p)
-                   for p in self._enc.encode(frame)]
+        packets = [HDR.pack(self._seq) + bytes(p) for p in self._enc.encode(frame)]
 
         send = open_ and not muted
         with self._lock:
@@ -300,41 +325,30 @@ class VoiceEngine(QObject):
         if send and targets:
             burst = (list(self._preroll) if not self.gate else []) + packets
             for pkt in burst:
-                for addr in targets:
-                    try:
-                        self.sock.sendto(pkt, addr)
-                    except OSError:
-                        pass
+                for uid in targets:
+                    self.mesh.send_datagram(uid, pkt)
             self._preroll.clear()
         else:
             self._preroll.extend(packets)
         self._set_gate(send)
 
     # ── receiving & playback ────────────────────────────────────────
-    def _rx_loop(self):
-        while self.running:
-            try:
-                data, _ = self.sock.recvfrom(4096)
-            except (socket.timeout, ConnectionResetError):
-                continue
-            except OSError:
-                break
-            if len(data) <= HDR.size or data[:2] != MAGIC:
-                continue
-            _, ver, flags, sender, seq = HDR.unpack_from(data)
-            uid = sender.hex()
-            with self._lock:
-                if uid not in self.allowed:
-                    continue
-                dec = self._decoders.get(uid)
-                if dec is None:
-                    dec = self._decoders[uid] = self._make_decoder()
-            try:
-                for f in dec.decode(av.Packet(data[HDR.size:])):
-                    self._jbuf[uid].append(f.to_ndarray()[0].astype(np.float32) / 32768)
-            except Exception:
-                continue
-            self._last_rx[uid] = time.monotonic()
+    def _on_voice(self, uid, data):
+        """A voice datagram from a peer (network thread)."""
+        if len(data) <= HDR.size:
+            return
+        with self._lock:
+            if uid not in self.allowed:
+                return
+            dec = self._decoders.get(uid)
+            if dec is None:
+                dec = self._decoders[uid] = self._make_decoder()
+        try:
+            for f in dec.decode(av.Packet(data[HDR.size:])):
+                self._jbuf[uid].append(f.to_ndarray()[0].astype(np.float32) / 32768)
+        except Exception:
+            return
+        self._last_rx[uid] = time.monotonic()
 
     def _out_cb(self, outdata, frames, t, status):
         mix = np.zeros(frames, np.float32)
@@ -353,10 +367,6 @@ class VoiceEngine(QObject):
                     buf.popleft()
                 self._playing[uid] = playing
             mix *= self.s["output_volume"] / 100.0
-        if self.monitor and self._monitor_buf:
-            chunk = self._monitor_buf.popleft()
-            if len(chunk) == frames:
-                mix += chunk
         for fx in list(self._fx):
             arr, pos = fx
             piece = arr[pos:pos + frames]
@@ -364,6 +374,13 @@ class VoiceEngine(QObject):
             fx[1] += frames
             if fx[1] >= len(arr):
                 self._fx.remove(fx)
+        if self.in_stream is not None and self._apm is not None:
+            # echo reference: everything the speakers play except our own mic-test loopback
+            self._far.append((np.clip(mix, -1.0, 1.0) * 32767).astype(np.int16))
+        if self.monitor and self._monitor_buf:
+            chunk = self._monitor_buf.popleft()
+            if len(chunk) == frames:
+                mix += chunk
         np.clip(mix, -1.0, 1.0, out=mix)
         outdata[:, 0] = mix
         outdata[:, 1] = mix

@@ -12,9 +12,10 @@ import time
 import traceback
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+ROOT = Path(__file__).resolve().parent
+sys.path.insert(0, str(ROOT))
 
-REQUIRED = ("PySide6", "sounddevice", "av", "numpy")
+REQUIRED = ("PySide6", "sounddevice", "av", "numpy", "iroh")
 
 
 def _missing():
@@ -22,12 +23,27 @@ def _missing():
     return [m for m in REQUIRED if importlib.util.find_spec(m) is None]
 
 
-def _fatal(text):
+def _message(text, icon):
     try:
         import ctypes
-        ctypes.windll.user32.MessageBoxW(None, text, "МойДискорд", 0x10)
+        ctypes.windll.user32.MessageBoxW(None, text, "МойДискорд", icon)
     except Exception:
         print(text)
+
+
+def _fatal(text):
+    _message(text, 0x10)
+
+
+def _install_requirements():
+    """After a self-update the new code may need packages the old version didn't have."""
+    import subprocess
+    _message("МойДискорд обновился — доустанавливаю новые компоненты.\n"
+             "Это займёт минуту, потом окно откроется само.", 0x40)
+    exe = Path(sys.executable)
+    py = exe.with_name("python.exe") if exe.name.lower() == "pythonw.exe" else exe
+    subprocess.run([str(py), "-m", "pip", "install", "-q", "-r", str(ROOT / "requirements.txt")],
+                   creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
 
 
 def _setup_logging():
@@ -45,6 +61,9 @@ def _setup_logging():
 
 def main():
     missing = _missing()
+    if missing and "PySide6" not in missing:
+        _install_requirements()
+        missing = _missing()
     if missing:
         _fatal("Не установлены модули: " + ", ".join(missing) + "\n\nЗапустите setup.bat — он всё поставит.")
         return 1

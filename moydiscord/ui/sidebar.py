@@ -255,7 +255,13 @@ class Sidebar(QWidget):
 
     # ── menus ───────────────────────────────────────────────────────
     def room_menu(self):
+        from .dialogs import InviteDialog, JoinDialog
         m = QMenu(self)
+        m.addAction(icons.icon("user", T.c["text"], 16), "Пригласить друга",
+                    lambda: InviteDialog(self.win, self.core).exec())
+        m.addAction(icons.icon("logout", T.c["text"], 16), "Присоединиться по коду",
+                    lambda: JoinDialog(self.win, self.core).exec())
+        m.addSeparator()
         m.addAction(icons.icon("hash", T.c["text"], 16), "Создать текстовый канал",
                     lambda: self.win.create_channel_dialog("text"))
         m.addAction(icons.icon("volume", T.c["text"], 16), "Создать голосовой канал",
