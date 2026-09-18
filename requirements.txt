@@ -1,3 +1,6 @@
-mss==9.0.1
-Pillow==11.1.0
-numpy==1.26.4
+PySide6-Essentials>=6.7
+sounddevice>=0.4.6
+av>=12
+numpy>=1.26
+mss>=10
+Pillow>=10

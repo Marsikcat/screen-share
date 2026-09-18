@@ -12,5 +12,5 @@ stderr.txt
 ffplay_err.txt
 ffplay_err2.txt
 test_nvenc.ts
-screen_share.lnk
+*.lnk
 *.zip
