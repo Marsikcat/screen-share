@@ -215,7 +215,7 @@ class InviteDialog(Dialog):
                                "даже если он в другом городе.", "muted", wrap=True))
         box = QPlainTextEdit(code)
         box.setReadOnly(True)
-        box.setFixedHeight(92)
+        box.setFixedHeight(64)
         box.setStyleSheet("font-family: Consolas;")
         self.v.addWidget(box)
         if core.s["network_mode"] != "internet":
@@ -236,8 +236,8 @@ class JoinDialog(Dialog):
         self.core, self.win = core, parent
         self.v.addWidget(label("Вставьте код приглашения, который прислал друг.", "muted", wrap=True))
         self.box = QPlainTextEdit()
-        self.box.setPlaceholderText("moyd:…")
-        self.box.setFixedHeight(92)
+        self.box.setPlaceholderText("moyd-…")
+        self.box.setFixedHeight(64)
         self.box.setStyleSheet("font-family: Consolas;")
         self.v.addWidget(self.box)
         self.error = label("", "hint", wrap=True)

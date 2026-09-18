@@ -358,13 +358,23 @@ def page_network(view, v):
                       "muted", wrap=True))
 
     v.addWidget(section("Комната"))
-    closed = len(s["room_secret"]) == 64
+    closed = s.room_closed()
     v.addWidget(label(f"«{core.room_name()}» — " + ("закрытая: войти можно только по приглашению."
                       if closed else "открытая: в неё попадает каждый в вашей сети, кто введёт то же "
                       "название, а через интернет — по приглашению."), None, wrap=True))
     row = QHBoxLayout()
     row.addWidget(button("Пригласить друга", None, lambda: InviteDialog(win, core).exec()))
     row.addWidget(button("Присоединиться по коду", "secondary", lambda: JoinDialog(win, core).exec()))
+
+    def new_closed():
+        from .dialogs import ask_text
+        name = ask_text(win, "Закрытая комната", "Название", placeholder="Например, Команда мечты",
+                        ok="Создать", text="В неё можно попасть только по вашему приглашению. "
+                        "Приложение перезапустится.")
+        if name:
+            core.create_closed_room(name)
+            win.restart()
+    row.addWidget(button("Создать закрытую комнату", "secondary", new_closed))
     row.addStretch(1)
     v.addSpacing(6)
     v.addLayout(row)

@@ -137,10 +137,14 @@ class Settings(dict):
     def uid(self):
         return self["uid"]
 
+    def room_closed(self):
+        """Closed rooms have a random secret and are reachable only by invite."""
+        return len(self["room_secret"]) in (32, 64)
+
     def room_secret(self):
-        """Joining a room = knowing its secret. Named rooms derive it from the name, so friends
-        on the same LAN who type the same name meet; invite codes carry a random one."""
-        if len(self["room_secret"]) == 64:
+        """Joining a room = knowing its secret. Open rooms derive it from the name, so friends
+        on the same LAN who type the same name meet; closed rooms have a random one."""
+        if self.room_closed():
             return bytes.fromhex(self["room_secret"])
         return hashlib.sha256(("moydiscord-room:" + self["room"].strip().lower()).encode()).digest()
 
@@ -148,7 +152,10 @@ class Settings(dict):
         return hashlib.sha256(self.room_secret()).hexdigest()[:32]
 
     def room_dir(self):
-        safe = "".join(ch if ch.isalnum() else "_" for ch in self["room"].lower()) or "room"
+        if self.room_closed():   # a closed room's name can change (it syncs as an event)
+            safe = "closed-" + self.room_id()[:12]
+        else:
+            safe = "".join(ch if ch.isalnum() else "_" for ch in self["room"].lower()) or "room"
         path = DATA / "rooms" / safe
         path.mkdir(parents=True, exist_ok=True)
         return path

@@ -4,6 +4,7 @@ import base64
 import hashlib
 import mimetypes
 import re
+import secrets
 import shutil
 import threading
 import time
@@ -76,6 +77,8 @@ class Core(QObject):
         self.mesh.start()
         self.voice.start()
         self._timer.start()
+        if self.s.room_closed() and not self.store.room_name[2] and self.s["room"] != "Комната друга":
+            self.set_room_name(self.s["room"])      # we created it: publish its name
         if not self.store.profiles.get(self.me) or \
                 self.store.profiles[self.me]["name"] != self.s["name"]:
             if self.s["name"]:
@@ -168,7 +171,17 @@ class Core(QObject):
         self.mesh.broadcast({"t": "addr", "addr": {**self.mesh.my_addr, "name": self.s["name"]}})
 
     def create_invite(self):
-        return make_invite(self.s["room"], self.s.room_secret(), self.mesh.my_card())
+        if self.s.room_closed():
+            # the name of a closed room travels as an event, so the invite can stay short
+            if not self.store.room_name[2]:
+                self.set_room_name(self.s["room"])
+            return make_invite(self.me, self.mesh.my_addr["relay"], secret=self.s.room_secret())
+        return make_invite(self.me, self.mesh.my_addr["relay"], room=self.s["room"])
+
+    def create_closed_room(self, name):
+        """A fresh room with a random secret: only people you invite can join. Needs a restart."""
+        self.s["room"], self.s["room_secret"] = name, secrets.token_hex(16)
+        self.s.save()
 
     def join_invite(self, code):
         """Returns True if the app has to restart (a different room), False if we just dial."""
@@ -176,9 +189,14 @@ class Core(QObject):
         peer = inv["peer"]
         if peer["id"] == self.me:
             raise ValueError("это ваше собственное приглашение — отправьте его другу")
-        restart = inv["secret"] != self.s.room_secret().hex()
-        if restart:
-            self.s["room"], self.s["room_secret"] = inv["room"], inv["secret"]
+        if inv["secret"]:
+            restart = inv["secret"] != self.s["room_secret"]
+            if restart:
+                self.s["room"], self.s["room_secret"] = "Комната друга", inv["secret"]
+        else:
+            restart = self.s.room_closed() or inv["room"].strip().lower() != self.s["room"].strip().lower()
+            if restart:
+                self.s["room"], self.s["room_secret"] = inv["room"], ""
         self._remember(peer["id"], peer)
         if not restart:
             self.mesh.dial(peer["id"], peer.get("relay"), peer.get("addrs") or [])

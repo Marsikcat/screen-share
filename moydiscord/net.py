@@ -14,7 +14,6 @@ Networking on iroh (Rust QUIC): peers are dialled by public key, not by IP.
 """
 
 import asyncio
-import base64
 import collections
 import hashlib
 import hmac
@@ -74,29 +73,65 @@ def radmin_neighbours():
 
 
 # ── invites ─────────────────────────────────────────────────────────
-def make_invite(room, secret, peer):
-    """peer = {"id", "relay", "addrs", "name"} of whoever hands out the code."""
-    data = {"v": PROTOCOL, "room": room, "secret": secret.hex(), "peer": peer}
-    raw = json.dumps(data, ensure_ascii=False, separators=(",", ":")).encode()
-    return "moyd:" + base64.urlsafe_b64encode(raw).decode().rstrip("=")
+# Compact binary, base58 (no look-alike characters, double-click selects all of it):
+#   [version][public key: 32][relay len][relay label][kind][room][checksum: 2]
+# kind 0 = open room, followed by its name; kind 1 = closed room, followed by its secret.
+# No IP addresses: iroh exchanges them itself through the relay while punching NAT,
+# and on a LAN the broadcast finds the peer anyway.
+INVITE_PREFIX = "moyd-"
+B58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+N0_RELAY = re.compile(r"^https://([a-z0-9-]+)\.relay\.n0\.iroh\.link\.?/?$")
+
+
+def b58encode(data):
+    n = int.from_bytes(data, "big")
+    out = ""
+    while n:
+        n, r = divmod(n, 58)
+        out = B58[r] + out
+    return "1" * (len(data) - len(data.lstrip(b"\0"))) + out
+
+
+def b58decode(text):
+    n = 0
+    for ch in text:
+        n = n * 58 + B58.index(ch)
+    body = n.to_bytes((n.bit_length() + 7) // 8, "big")
+    return b"\0" * (len(text) - len(text.lstrip("1"))) + body
+
+
+def make_invite(peer_id, relay, room=None, secret=None):
+    """An invite into an open room (by name) or a closed one (by secret)."""
+    m = N0_RELAY.match(relay or "")
+    label = (m.group(1) if m else (relay or "")).encode()
+    body = bytes([1]) + bytes.fromhex(peer_id) + bytes([len(label)]) + label
+    body += bytes([1]) + secret if secret else bytes([0]) + room.encode()
+    return INVITE_PREFIX + b58encode(body + hashlib.sha256(body).digest()[:2])
 
 
 def parse_invite(code):
     code = "".join(str(code).split())
-    if not code.startswith("moyd:"):
+    if not code.startswith(INVITE_PREFIX):
         raise ValueError("это не код приглашения МойДискорд")
-    body = code[5:]
     try:
-        data = json.loads(base64.urlsafe_b64decode(body + "=" * (-len(body) % 4)))
-        peer = data["peer"]
-        if not UID_RE.match(peer["id"]) or len(data["secret"]) != 64:
+        raw = b58decode(code[len(INVITE_PREFIX):])
+        body, check = raw[:-2], raw[-2:]
+        if hashlib.sha256(body).digest()[:2] != check or body[0] != 1:
             raise ValueError
-        return {"room": str(data["room"])[:32], "secret": data["secret"],
-                "peer": {"id": peer["id"], "relay": peer.get("relay"),
-                         "addrs": [str(a) for a in peer.get("addrs") or []][:8],
-                         "name": str(peer.get("name", ""))[:32]}}
-    except (ValueError, KeyError, TypeError):
+        peer_id = body[1:33].hex()
+        n = body[33]
+        label = body[34:34 + n].decode()
+        kind, rest = body[34 + n], body[35 + n:]
+        relay = (label if "://" in label else f"https://{label}.relay.n0.iroh.link./") if label else None
+        if kind == 1 and len(rest) in (16, 32):
+            room, secret = None, rest.hex()
+        elif kind == 0 and rest:
+            room, secret = rest.decode()[:32], None
+        else:
+            raise ValueError
+    except (ValueError, IndexError, UnicodeDecodeError):
         raise ValueError("код приглашения повреждён — скопируйте его целиком") from None
+    return {"peer": {"id": peer_id, "relay": relay, "addrs": []}, "room": room, "secret": secret}
 
 
 class LineReader:
@@ -232,13 +267,16 @@ class Mesh(QObject):
             threading.Thread(target=self._discover, daemon=True, name="discovery").start()
 
     def stop(self):
-        self.running = False
         if self.loop and self.loop.is_running():
+            # _shutdown clears `running` itself once connections are closed, so the loop
+            # doesn't stop underneath it
             fut = asyncio.run_coroutine_threadsafe(self._shutdown(), self.loop)
             try:
                 fut.result(timeout=4)
             except Exception:
                 pass
+        self.running = False
+        self._stopped.wait(2)
 
     def _thread_main(self):
         self.loop = asyncio.new_event_loop()
@@ -277,7 +315,6 @@ class Mesh(QObject):
             t.cancel()
 
     async def _shutdown(self):
-        self.running = False
         for p in list(self.peers_map.values()):
             try:
                 p.conn.close(0, b"bye")
@@ -288,6 +325,7 @@ class Mesh(QObject):
                 await asyncio.wait_for(self.ep.close(), 2)
             except Exception:
                 pass
+        self.running = False
 
     def _refresh_addr(self):
         a = self.ep.addr()
@@ -493,7 +531,7 @@ class Mesh(QObject):
             return {u: dict(v) for u, v in self.seen.items() if now - v["last"] < 15}
 
     def my_card(self):
-        """What goes into an invite code / peer exchange about us."""
+        """What goes into peer exchange about us."""
         return {"id": self.me, "relay": self.my_addr["relay"], "addrs": self.my_addr["addrs"],
                 "name": self.s["name"]}
 
