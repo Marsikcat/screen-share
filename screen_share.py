@@ -448,6 +448,9 @@ class FfmpegSender:
             self.log("FFmpeg window capture is Windows-only")
             return
 
+        # must be set before the relay threads start — their loops exit on False
+        self.running = True
+
         vf = []
         if self.window_title:
             input_src = ["-f", "gdigrab", "-framerate", q["fps"],
@@ -544,7 +547,6 @@ class FfmpegSender:
                 )
                 self.audio_proc = p  # keep last one for cleanup
             self.log(f"Audio: {self.audio_device}")
-        self.running = True
 
     def _monitor_stderr(self):
         for line in iter(self.proc.stderr.readline, b""):
@@ -586,7 +588,8 @@ class FfmpegSender:
                 continue
             try:
                 while self.running:
-                    data = self.proc.stdout.read(65536)
+                    # read1: forward whatever is ready instead of waiting for a full 64 KB
+                    data = self.proc.stdout.read1(65536)
                     if not data:
                         return
                     sock.sendall(data)
@@ -1706,6 +1709,12 @@ class ScreenShareApp:
         destinations = [(ip, DEFAULT_PORT) for ip in self._dest_ips]
         quality = self._host_quality.get()
 
+        # audio only when the box is ticked; prefer system loopback over a mic
+        audio_device = None
+        if self._use_audio.get():
+            devices = self._audio_loopback or self._audio_mics
+            audio_device = devices[0] if devices else None
+
         # parse capture selection
         window_title = None
         monitor_index = None
@@ -1740,9 +1749,7 @@ class ScreenShareApp:
         self._host_sender = FfmpegSender(
             destinations, quality, window_title=window_title,
             monitor_index=monitor_index, log_callback=self._hlog,
-            use_tcp=use_tcp,
-            audio_device=self._audio_loopback[0] if self._use_audio.get() and self._audio_loopback else
-                       (self._audio_mics[0] if self._audio_mics else None))
+            use_tcp=use_tcp, audio_device=audio_device)
 
         self._host_sender.start()
         self._host_btn.config(text=HOST_BTN_STOP)
