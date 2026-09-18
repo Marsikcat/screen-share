@@ -1,13 +1,14 @@
 """Settings pages that talk to hardware or the network."""
 
+import re
 import threading
 
 from PySide6.QtCore import QObject, Qt, QTimer, Signal
-from PySide6.QtWidgets import (QApplication, QButtonGroup, QComboBox, QGridLayout, QHBoxLayout,
+from PySide6.QtWidgets import (QApplication, QButtonGroup, QComboBox, QFrame, QGridLayout, QHBoxLayout,
                                QLabel, QLineEdit, QListWidget, QListWidgetItem, QRadioButton,
                                QSlider, QVBoxLayout, QWidget)
 
-from .. import stream, system, updater, voice
+from .. import hotkeys, stream, system, updater, voice
 from ..config import CONTROL_PORT, DISCOVERY_PORT, STREAM_PORT, VERSION, VOICE_PORT
 from ..net import local_ips
 from . import icons
@@ -47,6 +48,114 @@ def slider_row(title, value, lo, hi, on_change, suffix="%"):
     v.addWidget(cap)
     v.addWidget(s)
     return w
+
+
+def keycaps(keys):
+    """'Ctrl+Shift+M' → keys drawn as little caps."""
+    c = T.c
+    cap = (f"<span style='background-color:{c['rail'] if not T.light else c['active']}; "
+           f"color:{c['header']}; font-weight:600'>&nbsp;{{}}&nbsp;</span>")
+    groups = []
+    for group in keys.split(" / "):
+        # split on "+" between keys, but keep a trailing "+" that is itself the key ("Num +")
+        groups.append(" ".join(cap.format(k.strip()) for k in re.split(r"\s*\+\s*(?=.)", group)))
+    return f"<span style='color:{c['muted']}'> / </span>".join(groups)
+
+
+class BindButton(QWidget):
+    """Shows a hotkey and records a new one on click (Esc cancels, × clears)."""
+
+    def __init__(self, view, action):
+        super().__init__()
+        self.view, self.action, self.s = view, action, view.s
+        self.recorder = hotkeys.Recorder(self)
+        self.recorder.captured.connect(self._captured)
+        h = QHBoxLayout(self)
+        h.setContentsMargins(0, 0, 0, 0)
+        h.setSpacing(4)
+        self.btn = button("", "secondary", self._record)
+        self.btn.setMinimumWidth(230)
+        self.clear = IconButton("x", "Убрать сочетание", 16, 30)
+        self.clear.clicked.connect(lambda: self._set(None))
+        keep = self.clear.sizePolicy()
+        keep.setRetainSizeWhenHidden(True)      # buttons line up whether or not × is shown
+        self.clear.setSizePolicy(keep)
+        h.addWidget(self.btn)
+        h.addWidget(self.clear)
+        mgr = view.win.hotkeys
+        self.destroyed.connect(lambda: setattr(mgr, "paused", False))
+        self._refresh()
+
+    def _refresh(self):
+        b = self.s["hotkeys"].get(self.action)
+        self.btn.setText(hotkeys.describe(b))
+        self.btn.setStyleSheet("")
+        self.clear.setVisible(bool(b))
+
+    def _record(self):
+        self.view.win.hotkeys.paused = True
+        self.btn.setText("Нажмите сочетание…  (Esc — отмена)")
+        self.btn.setStyleSheet(f"background: {T.c['accent_soft']}; color: {T.c['header']};"
+                               f"border: 1px solid {T.c['accent']};")
+        self.recorder.start()
+
+    def _captured(self, binding):
+        self.view.win.hotkeys.paused = False
+        if binding:
+            self._set(binding)
+        else:
+            self._refresh()
+
+    def _set(self, binding):
+        hk = self.s["hotkeys"]
+        if binding:
+            for other, b in hk.items():
+                if other != self.action and b == binding:
+                    hk[other] = None
+                    self.view.win.toast(f"Сочетание снято с «{hotkeys.ACTIONS[other][0]}»")
+        hk[self.action] = binding
+        self.s.save()
+        self._refresh()
+
+
+# ── hotkeys ─────────────────────────────────────────────────────────
+def page_hotkeys(view, v):
+    s = view.s
+    v.addWidget(label("Горячие клавиши", "h2"))
+    v.addWidget(label("Сочетания ниже работают, даже когда окно свёрнуто или вы в игре. Клавиши не "
+                      "перехватываются — игра их тоже получит. Можно назначить кнопки мыши 4/5 и "
+                      "одиночный модификатор (например, левый Ctrl для рации).", "muted", wrap=True))
+    v.addWidget(switch_row("Работать вне окна приложения", "Выключите, если сочетания мешают в других "
+                           "программах, — тогда они будут действовать только в окне МойДискорд.",
+                           s["hotkeys_global"], lambda on: (s.__setitem__("hotkeys_global", on), s.save())))
+    v.addWidget(section("Голосовая связь и демонстрация"))
+    for action, (title, hint) in hotkeys.ACTIONS.items():
+        row = QFrame()
+        row.setStyleSheet(f"QFrame {{ border-bottom: 1px solid {T.c['divider']}; }}"
+                          f"QLabel, QPushButton, QToolButton {{ border-bottom: none; }}")
+        h = QHBoxLayout(row)
+        h.setContentsMargins(0, 10, 0, 10)
+        col = QVBoxLayout()
+        col.setSpacing(1)
+        t = QLabel(title)
+        t.setStyleSheet(f"color: {T.c['header']}; font-weight: 600;")
+        col.addWidget(t)
+        if hint:
+            col.addWidget(label(hint, "hint", wrap=True))
+        h.addLayout(col, 1)
+        h.addWidget(BindButton(view, action), 0, Qt.AlignVCenter)
+        v.addWidget(row)
+    v.addWidget(section("Внутри приложения", "Работают, когда окно МойДискорд активно."))
+    grid = QGridLayout()
+    grid.setVerticalSpacing(8)
+    grid.setHorizontalSpacing(24)
+    for i, (keys, what) in enumerate(hotkeys.IN_APP):
+        k = QLabel(keycaps(keys))
+        k.setTextFormat(Qt.RichText)
+        grid.addWidget(k, i, 0)
+        grid.addWidget(label(what, wrap=True), i, 1)
+    grid.setColumnStretch(1, 1)
+    v.addLayout(grid)
 
 
 # ── voice ───────────────────────────────────────────────────────────
@@ -134,32 +243,11 @@ def page_voice(view, v):
     ptt_box = QWidget()
     pb = QHBoxLayout(ptt_box)
     pb.setContentsMargins(28, 6, 0, 0)
-    key_btn = button(system.key_name(s["ptt_key"]), "secondary")
-    key_btn.setMinimumWidth(200)
     pb.addWidget(label("Клавиша:", "muted"))
-    pb.addWidget(key_btn)
+    pb.addWidget(BindButton(view, "ptt"))
     pb.addWidget(slider_row("Задержка отпускания", s["ptt_release_ms"], 0, 1000,
                             lambda x: s.__setitem__("ptt_release_ms", x), " мс"), 1)
     v.addWidget(ptt_box)
-    capture = QTimer(key_btn, interval=30)
-    deadline = {"n": 0}
-
-    def start_capture():
-        key_btn.setText("Нажмите клавишу или кнопку мыши…")
-        deadline["n"] = 200
-        QTimer.singleShot(250, capture.start)  # let the click itself be released first
-
-    def poll():
-        deadline["n"] -= 1
-        vk = system.pressed_key()
-        if vk or deadline["n"] <= 0:
-            capture.stop()
-            if vk:
-                s["ptt_key"] = vk
-                s.save()
-            key_btn.setText(system.key_name(s["ptt_key"]))
-    capture.timeout.connect(poll)
-    key_btn.clicked.connect(start_capture)
 
     vad_box = QWidget()
     vb = QVBoxLayout(vad_box)

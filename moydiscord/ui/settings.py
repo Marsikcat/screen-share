@@ -17,6 +17,7 @@ NAV = [
     ("НАСТРОЙКИ ПРИЛОЖЕНИЯ", None),
     ("appearance", ("palette", "Внешний вид")),
     ("voice", ("mic", "Голос и звук")),
+    ("hotkeys", ("keyboard", "Горячие клавиши")),
     ("stream", ("screen", "Демонстрация экрана")),
     ("notifications", ("bell", "Уведомления")),
     ("network", ("globe", "Сеть")),

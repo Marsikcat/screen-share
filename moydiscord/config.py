@@ -1,5 +1,6 @@
 """Paths, ports and persistent user settings."""
 
+import copy
 import json
 import os
 import secrets
@@ -54,7 +55,7 @@ DEFAULTS = {
     "input_mode": "vad",        # vad | ptt
     "vad_auto": True,
     "vad_threshold": -50,       # dBFS, used when vad_auto is off
-    "ptt_key": 0x56,            # V
+    "ptt_key": 0x56,            # legacy single-key PTT, migrated into "hotkeys"
     "ptt_release_ms": 200,
     "muted": False,
     "deafened": False,
@@ -68,6 +69,10 @@ DEFAULTS = {
     "sounds": True,
     "notify": True,
     "notify_mentions_only": False,
+    # hotkeys: action -> {"vk", "mods"} (see hotkeys.py)
+    "hotkeys": None,
+    "hotkeys_global": True,     # also when the window is not focused (games)
+    "last_voice": "",
     # window & startup
     "autostart": False,
     "start_minimized": True,    # when launched by autostart
@@ -84,11 +89,16 @@ class Settings(dict):
     """A dict that knows how to persist itself."""
 
     def __init__(self):
-        super().__init__(DEFAULTS)
+        super().__init__(copy.deepcopy(DEFAULTS))
         try:
             self.update(json.loads(SETTINGS_FILE.read_text(encoding="utf-8")))
         except (OSError, ValueError):
             pass
+        from .hotkeys import normalized
+        first_time = self["hotkeys"] is None
+        self["hotkeys"] = normalized(self["hotkeys"])
+        if first_time and self["ptt_key"] != DEFAULTS["ptt_key"]:
+            self["hotkeys"]["ptt"] = {"vk": self["ptt_key"], "mods": []}
         if not self.get("uid"):
             self["uid"] = secrets.token_hex(12)
         if not self.get("color"):

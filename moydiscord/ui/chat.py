@@ -221,6 +221,7 @@ class InputBox(QPlainTextEdit):
     files_pasted = Signal(list)
     edit_last = Signal()
     escape = Signal()
+    page = Signal(int)          # PgUp/PgDn scroll the messages while typing
 
     def __init__(self):
         super().__init__()
@@ -242,6 +243,8 @@ class InputBox(QPlainTextEdit):
             self.edit_last.emit()
         elif e.key() == Qt.Key_Escape:
             self.escape.emit()
+        elif e.key() in (Qt.Key_PageUp, Qt.Key_PageDown):
+            self.page.emit(-1 if e.key() == Qt.Key_PageUp else 1)
         else:
             super().keyPressEvent(e)
 
@@ -296,18 +299,20 @@ class Composer(QWidget):
         h = QHBoxLayout(box)
         h.setContentsMargins(10, 0, 8, 0)
         h.setSpacing(4)
-        attach = IconButton("plus_circle", "Прикрепить файл", 22, 36)
+        attach = IconButton("plus_circle", "Прикрепить файл (Ctrl+Shift+U)", 22, 36)
         attach.hover_bg = "transparent"
         attach.clicked.connect(self.pick_files)
         self.input = InputBox()
         self.input.submit.connect(self.send)
         self.input.files_pasted.connect(self.add_files)
         self.input.edit_last.connect(lambda: view.list.edit_last_own())
-        self.input.escape.connect(self.clear_reply)
+        self.input.escape.connect(self._escape)
+        self.input.page.connect(self._page)
         self.input.textChanged.connect(self._typing)
-        emoji = IconButton("smile", "Эмодзи", 22, 36)
+        emoji = IconButton("smile", "Эмодзи (Ctrl+E)", 22, 36)
         emoji.hover_bg = "transparent"
-        emoji.clicked.connect(lambda: self._emoji(emoji))
+        emoji.clicked.connect(self.open_emoji)
+        self.emoji_btn = emoji
         h.addWidget(attach, 0, Qt.AlignBottom)
         h.addWidget(self.input, 1)
         h.addWidget(emoji, 0, Qt.AlignBottom)
@@ -325,7 +330,19 @@ class Composer(QWidget):
         if self.input.toPlainText().strip() and self.view.cid:
             self.core.send_typing(self.view.cid)
 
-    def _emoji(self, anchor):
+    def _escape(self):
+        if self.reply:
+            self.clear_reply()
+        else:
+            self.view.list.scroll_bottom()
+            self.core.mark_read(self.view.cid)
+
+    def _page(self, direction):
+        sb = self.view.list.verticalScrollBar()
+        sb.setValue(sb.value() + direction * sb.pageStep())
+
+    def open_emoji(self):
+        anchor = self.emoji_btn
         picker = EmojiPicker(self.window())
         picker.picked.connect(lambda e: (self.input.insertPlainText(e), self.input.setFocus()))
         picker.popup_at(anchor.mapToGlobal(QPoint(anchor.width(), 0)))

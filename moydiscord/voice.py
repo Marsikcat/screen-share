@@ -8,7 +8,6 @@ which also plays the UI sound effects.
 """
 
 import collections
-import ctypes
 import math
 import socket
 import struct
@@ -22,6 +21,7 @@ import sounddevice as sd
 from PySide6.QtCore import QObject, Signal
 
 from .config import VOICE_PORT
+from .hotkeys import held
 
 SR = 48000
 FRAME = 960                      # 20 ms
@@ -31,13 +31,6 @@ HANGOVER = 15                    # frames the gate stays open after speech (300 
 PREROLL = 2                      # frames sent from before the gate opened
 JITTER_START = 2                 # frames buffered before a speaker starts playing
 JITTER_MAX = 8
-
-_user32 = ctypes.windll.user32 if hasattr(ctypes, "windll") else None
-
-
-def key_down(vk):
-    return bool(_user32 and _user32.GetAsyncKeyState(int(vk)) & 0x8000)
-
 
 # ── devices ─────────────────────────────────────────────────────────
 def _wasapi():
@@ -272,7 +265,7 @@ class VoiceEngine(QObject):
 
         # gate
         if self.s["input_mode"] == "ptt":
-            if key_down(self.s["ptt_key"]):
+            if held(self.s["hotkeys"].get("ptt")):
                 self._ptt_until = time.monotonic() + self.s["ptt_release_ms"] / 1000
             open_ = time.monotonic() < self._ptt_until
         else:

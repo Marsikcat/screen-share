@@ -32,6 +32,7 @@ class Core(QObject):
     typing_changed = Signal(str)
     file_ready = Signal(str)
     room_changed = Signal()
+    read_changed = Signal()
     stream_changed = Signal()
     toast = Signal(str, str)                # text, kind: info | error
     notify = Signal(str, str, str)          # title, body, channel id
@@ -264,6 +265,7 @@ class Core(QObject):
             if self.s["read"].get(cid, 0) < last:
                 self.s["read"][cid] = last
                 self.s.save()
+                self.read_changed.emit()
 
     def unread(self, cid):
         """(unread count, mentions) for a text channel."""
@@ -347,6 +349,8 @@ class Core(QObject):
         if self.my_voice:
             self.leave_voice(quiet=True)
         self.my_voice = cid
+        self.s["last_voice"] = cid
+        self.s.save()
         self.voice.start_input()
         self.voice.play("join")
         self._broadcast_state()

@@ -6,10 +6,12 @@ from pathlib import Path
 
 from PySide6.QtCore import QByteArray, QRectF, Qt, QTimer
 from PySide6.QtGui import QColor, QIcon, QKeySequence, QPainter, QPixmap, QShortcut
-from PySide6.QtWidgets import (QApplication, QFrame, QHBoxLayout, QLabel, QMainWindow, QMenu,
-                               QStackedWidget, QSystemTrayIcon, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QApplication, QFrame, QHBoxLayout, QLabel, QLineEdit, QMainWindow,
+                               QMenu, QPlainTextEdit, QStackedWidget, QSystemTrayIcon, QTextEdit,
+                               QVBoxLayout, QWidget)
 
 from .. import updater
+from ..hotkeys import HotkeyManager
 from ..config import APP_NAME, ROOT
 from . import dialogs, icons, theme
 from .chat import ChatView
@@ -66,9 +68,26 @@ class MainWindow(QMainWindow):
         core.toast.connect(self.toast)
         core.notify.connect(self.on_notify)
         core.channels_changed.connect(self._check_current)
-        QShortcut(QKeySequence("Ctrl+Shift+M"), self, core.toggle_mute)
-        QShortcut(QKeySequence("Ctrl+Shift+D"), self, core.toggle_deafen)
-        QShortcut(QKeySequence("Ctrl+,"), self, lambda: self.open_settings("profile"))
+        # global hotkeys (mute, deafen, stream…) — also active while the window is focused
+        self.hotkeys = HotkeyManager(self.s, lambda: QApplication.activeWindow() is not None,
+                                     self._is_typing)
+        self.hotkeys.triggered.connect(self.on_hotkey)
+        self.hotkeys.start()
+        # in-window shortcuts; the Cyrillic twins make them work on the Russian layout too
+        for keys, fn in (
+            (("Ctrl+K", "Ctrl+Л"), self.quick_switch),
+            (("Alt+Up",), lambda: self.step_channel(-1)),
+            (("Alt+Down",), lambda: self.step_channel(1)),
+            (("Alt+Shift+Up",), lambda: self.step_channel(-1, unread=True)),
+            (("Alt+Shift+Down",), lambda: self.step_channel(1, unread=True)),
+            (("Ctrl+E", "Ctrl+У"), self._emoji),
+            (("Ctrl+Shift+U", "Ctrl+Shift+Г"), self._attach),
+            (("Ctrl+,", "Ctrl+Б"), lambda: self.open_settings("profile")),
+            (("Ctrl+/", "Ctrl+."), self.show_shortcuts),
+        ):
+            sc = QShortcut(self)
+            sc.setKeys([QKeySequence(k) for k in keys])
+            sc.activated.connect(fn)
 
         if self.s["check_updates"]:
             QTimer.singleShot(4000, self._check_updates)
@@ -164,6 +183,71 @@ class MainWindow(QMainWindow):
         self.members.setVisible(vis)
         self.s["show_members"] = vis
         self.s.save()
+
+    # ── hotkeys ─────────────────────────────────────────────────────
+    @staticmethod
+    def _is_typing():
+        return isinstance(QApplication.focusWidget(), (QLineEdit, QPlainTextEdit, QTextEdit))
+
+    def on_hotkey(self, action):
+        core = self.core
+        if action == "toggle_mute":
+            core.toggle_mute()
+        elif action == "toggle_deafen":
+            core.toggle_deafen()
+        elif action == "leave_voice":
+            core.leave_voice()
+        elif action == "join_voice":
+            cid = self.s["last_voice"] if core.store.channel(self.s["last_voice"] or "") else None
+            cid = cid or next((c["id"] for c in core.store.channel_list("voice")), None)
+            if cid:
+                core.join_voice(cid)
+        elif action == "toggle_stream":
+            if core.sender.running:
+                core.stop_stream()
+            else:
+                self.show_window()
+                self.pick_stream()
+        elif action == "show_window":
+            if self.isVisible() and self.isActiveWindow():
+                self.hide() if (self.tray and self.s["close_to_tray"]) else self.showMinimized()
+            else:
+                self.show_window()
+
+    def _channel_order(self):
+        return self.core.store.channel_list("text") + self.core.store.channel_list("voice")
+
+    def step_channel(self, delta, unread=False):
+        chans = self._channel_order()
+        if unread:
+            chans = [c for c in chans if c["kind"] == "text" and
+                     (c["id"] == self.current or self.core.unread(c["id"])[0])]
+        ids = [c["id"] for c in chans]
+        if not ids:
+            return
+        i = ids.index(self.current) if self.current in ids else -1 if delta > 0 else len(ids)
+        target = ids[(i + delta) % len(ids)]
+        if target != self.current:
+            self.open_channel(target)
+
+    def quick_switch(self):
+        d = dialogs.QuickSwitcher(self, self.core)
+        if d.exec() and d.cid:
+            self.open_channel(d.cid)
+
+    def show_shortcuts(self):
+        dialogs.ShortcutsHelp(self, self.s).exec()
+
+    def _chat_active(self):
+        return self.stack.currentWidget() is self.root and self.views.currentWidget() is self.chat
+
+    def _emoji(self):
+        if self._chat_active():
+            self.chat.composer.open_emoji()
+
+    def _attach(self):
+        if self._chat_active():
+            self.chat.composer.pick_files()
 
     # ── settings ────────────────────────────────────────────────────
     def open_settings(self, page="profile"):

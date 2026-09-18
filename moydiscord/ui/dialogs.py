@@ -97,3 +97,107 @@ def onboarding(parent, settings):
     if d.exec() == QDialog.Accepted and edit.text().strip():
         return " ".join(edit.text().split()), state["color"]
     return None
+
+
+def _fuzzy(query, name):
+    """Substring match scores best; otherwise all letters in order (Discord-style)."""
+    q, n = query.lower(), name.lower()
+    if not q:
+        return 1
+    if n.startswith(q):
+        return 3
+    if q in n:
+        return 2
+    it = iter(n)
+    return 1 if all(ch in it for ch in q) else 0
+
+
+class QuickSwitcher(Dialog):
+    """Ctrl+K: type part of a channel name, Enter to jump."""
+
+    def __init__(self, parent, core):
+        super().__init__(parent, "Быстрый переход", width=520)
+        from PySide6.QtWidgets import QListWidget
+        from . import icons
+        self.core, self.icons = core, icons
+        self.cid = None
+        self.edit = QLineEdit()
+        self.edit.setPlaceholderText("Куда перейти? Начните вводить название канала")
+        self.edit.addAction(icons.icon("search", T.c["muted"], 18), QLineEdit.LeadingPosition)
+        self.list = QListWidget()
+        self.list.setMinimumHeight(300)
+        self.v.addWidget(self.edit)
+        self.v.addWidget(self.list)
+        self.v.addWidget(label("↑ ↓ — выбор   ·   Enter — перейти   ·   Esc — закрыть", "hint"))
+        self.edit.textChanged.connect(self._fill)
+        self.edit.returnPressed.connect(self._go)
+        self.list.itemActivated.connect(lambda _: self._go())
+        self.edit.installEventFilter(self)
+        self._fill("")
+
+    def _fill(self, text):
+        from PySide6.QtWidgets import QListWidgetItem
+        self.list.clear()
+        rows = []
+        for kind in ("text", "voice"):
+            for ch in self.core.store.channel_list(kind):
+                score = _fuzzy(text.strip(), ch["name"])
+                if score:
+                    unread = self.core.unread(ch["id"])[0] if kind == "text" else 0
+                    who = len(self.core.voice_members(ch["id"])) if kind == "voice" else 0
+                    rows.append((-score, -(unread > 0), ch, unread, who))
+        rows.sort(key=lambda r: (r[0], r[1]))
+        for _, _, ch, unread, who in rows:
+            extra = (f"   ·   непрочитанных: {unread}" if unread else "") + \
+                    (f"   ·   в канале: {who}" if who else "")
+            item = QListWidgetItem(self.icons.icon("hash" if ch["kind"] == "text" else "volume",
+                                                   T.c["muted"], 18), ch["name"] + extra)
+            item.setData(Qt.UserRole, ch["id"])
+            self.list.addItem(item)
+        if self.list.count():
+            self.list.setCurrentRow(0)
+
+    def eventFilter(self, obj, e):
+        if obj is self.edit and e.type() == e.Type.KeyPress and e.key() in (Qt.Key_Up, Qt.Key_Down):
+            row = self.list.currentRow() + (1 if e.key() == Qt.Key_Down else -1)
+            self.list.setCurrentRow(max(0, min(self.list.count() - 1, row)))
+            return True
+        return super().eventFilter(obj, e)
+
+    def _go(self):
+        item = self.list.currentItem()
+        if item:
+            self.cid = item.data(Qt.UserRole)
+            self.accept()
+
+
+class ShortcutsHelp(Dialog):
+    """Ctrl+/: every shortcut in one place."""
+
+    def __init__(self, parent, settings):
+        super().__init__(parent, "Горячие клавиши", width=620)
+        from PySide6.QtWidgets import QGridLayout, QLabel
+        from .. import hotkeys
+        from .settings_pages import keycaps
+
+        def table(rows):
+            grid = QGridLayout()
+            grid.setVerticalSpacing(7)
+            grid.setHorizontalSpacing(20)
+            for i, (keys, what) in enumerate(rows):
+                k = QLabel(keycaps(keys) if keys else f"<span style='color:{T.c['muted']}'>не назначено</span>")
+                k.setTextFormat(Qt.RichText)
+                grid.addWidget(k, i, 0)
+                grid.addWidget(label(what, wrap=True), i, 1)
+            grid.setColumnStretch(1, 1)
+            return grid
+
+        self.v.addWidget(label("ГЛОБАЛЬНЫЕ — РАБОТАЮТ И В ИГРАХ", "caption"))
+        bound = settings["hotkeys"]
+        self.v.addLayout(table([(hotkeys.describe(bound.get(a)) if bound.get(a) else "", title)
+                                for a, (title, _) in hotkeys.ACTIONS.items()]))
+        self.v.addSpacing(8)
+        self.v.addWidget(label("ВНУТРИ ПРИЛОЖЕНИЯ", "caption"))
+        self.v.addLayout(table(hotkeys.IN_APP))
+        self.v.addWidget(label("Изменить глобальные сочетания: Настройки → Горячие клавиши.", "hint"))
+        self.buttons("Понятно", cancel=False)

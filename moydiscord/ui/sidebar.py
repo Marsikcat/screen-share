@@ -4,6 +4,7 @@ from PySide6.QtCore import QPoint, Qt, Signal
 from PySide6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QMenu, QScrollArea, QSlider,
                                QVBoxLayout, QWidget, QWidgetAction)
 
+from .. import hotkeys
 from . import icons
 from .theme import T
 from .widgets import Avatar, IconButton
@@ -174,6 +175,7 @@ class Sidebar(QWidget):
         core.stream_changed.connect(self.update_voice_panel)
         core.speaking_changed.connect(self.update_speaking)
         core.message_added.connect(self._on_message)
+        core.read_changed.connect(self.update_unread)
         self.update_room()
         self.rebuild()
 
@@ -439,7 +441,11 @@ class Sidebar(QWidget):
         muted = s["muted"] or s["deafened"]
         self.mic_btn.setChecked(muted)
         self.mic_btn.set_icon("mic_off" if muted else "mic")
-        self.mic_btn.setToolTip("Вкл. микрофон" if muted else "Выкл. микрофон")
+        self.mic_btn.setToolTip(self._with_key("Вкл. микрофон" if muted else "Выкл. микрофон", "toggle_mute"))
         self.deaf_btn.setChecked(s["deafened"])
         self.deaf_btn.set_icon("headphones_off" if s["deafened"] else "headphones")
-        self.deaf_btn.setToolTip("Вкл. звук" if s["deafened"] else "Выкл. звук")
+        self.deaf_btn.setToolTip(self._with_key("Вкл. звук" if s["deafened"] else "Выкл. звук", "toggle_deafen"))
+
+    def _with_key(self, text, action):
+        b = self.core.s["hotkeys"].get(action)
+        return f"{text}  ({hotkeys.describe(b)})" if b else text

@@ -63,12 +63,22 @@ def open_firewall():
         return False
 
 
-MOUSE_KEYS = {0x04: "Средняя кнопка мыши", 0x05: "Кнопка мыши 4", 0x06: "Кнопка мыши 5"}
+SPECIAL_KEYS = {
+    0x04: "Средняя кнопка мыши", 0x05: "Кнопка мыши 4", 0x06: "Кнопка мыши 5",
+    0xA0: "Левый Shift", 0xA1: "Правый Shift", 0xA2: "Левый Ctrl", 0xA3: "Правый Ctrl",
+    0xA4: "Левый Alt", 0xA5: "Правый Alt", 0x5B: "Левый Win", 0x5C: "Правый Win",
+    0x20: "Пробел", 0x08: "Backspace", 0x09: "Tab", 0x14: "Caps Lock", 0x13: "Pause",
+    0x2C: "Print Screen", 0x91: "Scroll Lock", 0xC0: "Ё",
+}
 
 
 def key_name(vk):
-    if vk in MOUSE_KEYS:
-        return MOUSE_KEYS[vk]
+    if vk in SPECIAL_KEYS:
+        return SPECIAL_KEYS[vk]
+    if 0x70 <= vk <= 0x87:
+        return f"F{vk - 0x6F}"
+    if 0x30 <= vk <= 0x39 or 0x41 <= vk <= 0x5A:
+        return chr(vk)
     try:
         user32 = ctypes.windll.user32
         scan = user32.MapVirtualKeyW(vk, 0)
@@ -80,13 +90,3 @@ def key_name(vk):
         pass
     return f"Клавиша {vk}"
 
-
-def pressed_key():
-    """First virtual key currently held (ignores left/right mouse buttons)."""
-    user32 = ctypes.windll.user32
-    for vk in range(0x03, 0xFF):
-        if vk in (0x0D,):     # Enter would fire when confirming dialogs
-            continue
-        if user32.GetAsyncKeyState(vk) & 0x8000:
-            return vk
-    return None
