@@ -448,6 +448,7 @@ def page_updates(view, v):
     v.addSpacing(10)
     status = label("", "muted", wrap=True)
     v.addWidget(status)
+    last = {}                   # the latest check result: what «Обновить» installs
 
     card = QFrame()
     card.setStyleSheet(f"QFrame {{ background: {c['side']}; border-radius: 8px; }}")
@@ -470,12 +471,12 @@ def page_updates(view, v):
     notes.setOpenExternalLinks(True)
     notes.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.LinksAccessibleByMouse)
     cl.addWidget(notes)
-    open_page = button("Открыть релиз на GitHub", "link")
+    open_page = button("Открыть релиз на GitHub", "link",
+                       lambda: __import__("webbrowser").open(last.get("url", updater.RELEASES_PAGE)))
     cl.addWidget(open_page, 0, Qt.AlignLeft)
     card.hide()
     v.addSpacing(8)
     v.addWidget(card)
-    last = {}
 
     def checked(res):
         check.setEnabled(True)
@@ -500,11 +501,6 @@ def page_updates(view, v):
         title.setText(res["title"])
         date.setText(".".join(reversed(res["date"].split("-"))) if res["date"] else "")
         notes.setText(res["notes"] or "_Описание не загрузилось — откройте релиз на GitHub._")
-        try:
-            open_page.clicked.disconnect()
-        except (RuntimeError, TypeError):
-            pass
-        open_page.clicked.connect(lambda: __import__("webbrowser").open(res["url"]))
         card.show()
 
     def do_check():
