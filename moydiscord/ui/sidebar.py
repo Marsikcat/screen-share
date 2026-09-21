@@ -1,6 +1,6 @@
 """Left column: room header, channels with voice participants, voice panel, user panel."""
 
-from PySide6.QtCore import QPoint, Qt, Signal
+from PySide6.QtCore import QPoint, Qt, QTimer, Signal
 from PySide6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QMenu, QScrollArea, QSlider,
                                QVBoxLayout, QWidget, QWidgetAction)
 
@@ -397,13 +397,22 @@ class Sidebar(QWidget):
         self.vp_share_text.setText("Остановить трансляцию" if streaming else "Демонстрация экрана")
         self.vp_share_text.setStyleSheet(f"color: {'white' if streaming else c['header']}; font-weight: 600;")
         if streaming:
-            n = len(self.core.watchers)
-            self.vp_stream.setText(f"В эфире: {self.core.stream_info}\nСмотрят: {n}")
+            self.update_stream_line()
         elif self.core.viewer.uid:
             self.vp_stream.setText(f"Вы смотрите трансляцию {self.core.name_of(self.core.viewer.uid)}")
         else:
             self.vp_stream.setText("")
         self.vp_stream.setVisible(bool(self.vp_stream.text()))
+
+    def update_stream_line(self):
+        """While we are streaming: viewers and the real bitrate, so it is clear it is live."""
+        if not self.core.sender.running:
+            return
+        n = len(self.core.watchers)
+        rate = f"{self.core.sender.bitrate():.1f}".replace(".", ",")
+        self.vp_stream.setText(f"В эфире: {self.core.stream_info}\n"
+                               f"{'Смотрят: ' + str(n) if n else 'Никто не смотрит'}  ·  {rate} Мбит/с")
+        self.vp_stream.setVisible(True)
 
     def _build_user_panel(self):
         panel = QFrame()
@@ -433,6 +442,8 @@ class Sidebar(QWidget):
         gear.clicked.connect(lambda: self.open_settings.emit("profile"))
         for b in (self.mic_btn, self.deaf_btn, gear):
             h.addWidget(b)
+        self._stream_timer = QTimer(self, interval=1000, timeout=self.update_stream_line)
+        self._stream_timer.start()
         self.core.voice_changed.connect(self.update_user)
         self.core.members_changed.connect(self.update_user)
         self.update_user()

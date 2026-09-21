@@ -2,8 +2,8 @@
 
 import math
 
-from PySide6.QtCore import QRectF, QSize, Qt, Signal
-from PySide6.QtGui import QColor, QIcon, QImage, QPainter, QPen, QPixmap
+from PySide6.QtCore import QRectF, QSize, Qt, QTimer, Signal
+from PySide6.QtGui import QColor, QIcon, QImage, QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtWidgets import (QButtonGroup, QComboBox, QDialog, QFrame, QGridLayout, QHBoxLayout,
                                QLabel, QListWidget, QListWidgetItem, QStackedWidget, QToolButton,
                                QVBoxLayout, QWidget)
@@ -20,6 +20,8 @@ class Tile(QFrame):
         self.view, self.core, self.uid = view, view.core, uid
         m = self.core.member(uid)
         self.m = m
+        self.preview = None          # live thumbnail of our own screen share
+        self.stats = None
         self.speaking = self.core.is_speaking(uid) and not m["state"].get("muted")
         lay = QVBoxLayout(self)
         lay.setContentsMargins(12, 10, 12, 10)
@@ -41,11 +43,19 @@ class Tile(QFrame):
         lay.addLayout(center)
         if st.get("streaming"):
             lay.addSpacing(8)
+            if uid == self.core.me:
+                self.avatar.hide()          # the preview itself shows who is sharing what
+                self.stats = QLabel()
+                self.stats.setAlignment(Qt.AlignCenter)
+                self.stats.setStyleSheet("background: rgba(0,0,0,0.45); color: white;"
+                                         "border-radius: 4px; padding: 3px 8px; font-weight: 600;")
+                lay.addWidget(self.stats, 0, Qt.AlignHCenter)
+                lay.addSpacing(6)
+                self.update_stats()
             row = QHBoxLayout()
             row.addStretch(1)
             if uid == self.core.me:
-                b = button(f"Остановить трансляцию · смотрят {len(self.core.watchers)}", "danger",
-                           self.core.stop_stream)
+                b = button("Остановить трансляцию", "danger", self.core.stop_stream)
             elif self.core.viewer.uid == uid:
                 b = button("Прекратить просмотр", "secondary", self.core.unwatch)
             else:
@@ -74,6 +84,17 @@ class Tile(QFrame):
         self.avatar.set_speaking(on)
         self.update()
 
+    def set_preview(self, pixmap):
+        self.preview = pixmap
+        self.update()
+
+    def update_stats(self):
+        if self.stats is not None:
+            rate = self.core.sender.bitrate()
+            watchers = len(self.core.watchers)
+            who = "никто не смотрит" if not watchers else f"смотрят: {watchers}"
+            self.stats.setText(f"{who}   ·   {rate:.1f} Мбит/с".replace(".", ","))
+
     def paintEvent(self, _):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
@@ -81,6 +102,19 @@ class Tile(QFrame):
         p.setBrush(QColor(mix(self.m["color"], T.c["rail"], 0.55)))
         p.setPen(QPen(QColor(T.c["green"]), 3) if self.speaking else Qt.NoPen)
         p.drawRoundedRect(r, 10, 10)
+        if self.preview and not self.preview.isNull():
+            path = QPainterPath()
+            path.addRoundedRect(r, 10, 10)
+            p.setClipPath(path)
+            scaled = self.preview.scaled(self.size(), Qt.KeepAspectRatioByExpanding,
+                                         Qt.SmoothTransformation)
+            p.drawPixmap(int((self.width() - scaled.width()) / 2),
+                         int((self.height() - scaled.height()) / 2), scaled)
+            p.setClipping(False)
+            if self.speaking:
+                p.setPen(QPen(QColor(T.c["green"]), 3))
+                p.setBrush(Qt.NoBrush)
+                p.drawRoundedRect(r, 10, 10)
 
 
 class VoiceView(QWidget):
@@ -91,6 +125,7 @@ class VoiceView(QWidget):
         self.core = core
         self.cid = None
         self.tiles = {}
+        self.preview = None                 # last frame of our own screen share
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(0)
@@ -134,6 +169,9 @@ class VoiceView(QWidget):
         core.stream_changed.connect(self.rebuild)
         core.members_changed.connect(self.rebuild)
         core.speaking_changed.connect(self._speaking)
+        core.preview.frame.connect(self._on_preview)
+        self._stats_timer = QTimer(self, interval=1000, timeout=self._update_stats)
+        self._stats_timer.start()
 
     def _round(self, name, tip, fn, danger=False):
         b = QToolButton()
@@ -181,6 +219,8 @@ class VoiceView(QWidget):
             cols = max(1, min(4, math.ceil(math.sqrt(len(uids)))))
             for i, uid in enumerate(uids):
                 t = Tile(self, uid)
+                if uid == self.core.me and self.core.sender.running:
+                    t.set_preview(self.preview)
                 self.tiles[uid] = t
                 self.grid.addWidget(t, i // cols, i % cols, Qt.AlignCenter)
             self._cols = cols
@@ -235,6 +275,18 @@ class VoiceView(QWidget):
         t = self.tiles.get(uid)
         if t:
             t.set_speaking(on and not self.core.member(uid)["state"].get("muted"))
+
+    def _on_preview(self, image):
+        self.preview = QPixmap.fromImage(image)
+        tile = self.tiles.get(self.core.me)
+        if tile:
+            tile.set_preview(self.preview)
+
+    def _update_stats(self):
+        if self.core.sender.running:
+            tile = self.tiles.get(self.core.me)
+            if tile:
+                tile.update_stats()
 
 
 def _thumbnail(mon):

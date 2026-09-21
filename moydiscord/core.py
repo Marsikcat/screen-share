@@ -16,7 +16,7 @@ from PySide6.QtCore import QObject, QTimer, Signal
 from .config import FILES_DIR, MAX_FILE, VERSION
 from .net import Mesh, make_invite, parse_invite
 from .store import UID_RE, Store, author_of, text_channel_name
-from .stream import StreamSender, StreamViewer
+from .stream import SourcePreview, StreamSender, StreamViewer
 from .voice import VoiceEngine
 
 FILE_CHUNK = 192 * 1024
@@ -67,6 +67,7 @@ class Core(QObject):
         self.voice.speaking.connect(self._on_local_speaking)
         self.voice.failed.connect(lambda m: self.toast.emit(m, "error"))
         self.sender = StreamSender(self.mesh)
+        self.preview = SourcePreview()      # what the streamer sees of their own stream
         self.sender.stopped.connect(self._on_stream_stopped)
         self.viewer = StreamViewer(self.mesh)
         self.viewer.closed.connect(self._on_viewer_closed)
@@ -85,6 +86,7 @@ class Core(QObject):
                 self._publish("profile", name=self.s["name"], color=self.s["color"])
 
     def shutdown(self):
+        self.preview.stop()
         self.sender.stop()
         self.viewer.stop()
         self.voice.shutdown()
@@ -495,12 +497,14 @@ class Core(QObject):
         if ok:
             self.sender.set_viewers(self._watcher_uids())
             self.stream_info = f"{source['label']} · {self.sender.encoder_label}"
+            self.preview.start(source)
             self.voice.play("stream")
         self._broadcast_state()
         self.stream_changed.emit()
 
     def stop_stream(self):
         if self.sender.stop():
+            self.preview.stop()
             self.watchers.clear()
             self._broadcast_state()
             self.stream_changed.emit()
@@ -508,6 +512,7 @@ class Core(QObject):
     def _on_stream_stopped(self, reason):
         if reason:
             self.toast.emit(reason, "error")
+        self.preview.stop()
         self.watchers.clear()
         self._broadcast_state()
         self.stream_changed.emit()

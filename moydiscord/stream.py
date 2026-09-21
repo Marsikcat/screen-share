@@ -15,8 +15,10 @@ import ctypes.wintypes as wt
 import socket
 import subprocess
 import threading
+import time
 
-from PySide6.QtCore import QObject, Signal
+from PySide6.QtCore import QObject, Qt, Signal
+from PySide6.QtGui import QImage
 
 from .config import FFMPEG_BIN, FFPLAY_BIN, STREAM_PORT, STREAM_RELAY_PORT
 
@@ -135,6 +137,67 @@ def list_windows(exclude_titles=()):
     return sorted(wins, key=lambda w: w["title"].lower())
 
 
+def window_rect(title):
+    """Where the shared window is right now (it can be moved or resized while streaming)."""
+    user32 = ctypes.windll.user32
+    hwnd = user32.FindWindowW(None, title)
+    if not hwnd or not user32.IsWindowVisible(hwnd):
+        return None
+    r = wt.RECT()
+    user32.GetWindowRect(hwnd, ctypes.byref(r))
+    if r.right - r.left < 8 or r.bottom - r.top < 8:
+        return None
+    return {"left": r.left, "top": r.top, "width": r.right - r.left, "height": r.bottom - r.top}
+
+
+class SourcePreview(QObject):
+    """A few frames per second of what we are sharing, so the streamer sees it is really live."""
+
+    frame = Signal(QImage)
+
+    def __init__(self):
+        super().__init__()
+        self._thread = None
+        self._stop = threading.Event()
+
+    def start(self, source, fps=3, width=520):
+        self.stop()
+        self._stop.clear()
+        self._thread = threading.Thread(target=self._loop, args=(source, fps, width), daemon=True)
+        self._thread.start()
+
+    def stop(self):
+        self._stop.set()
+        if self._thread:
+            self._thread.join(timeout=1)
+            self._thread = None
+
+    @staticmethod
+    def _region(source):
+        if source["kind"] == "monitor":
+            return {k: source[k] for k in ("left", "top", "width", "height")}
+        return window_rect(source["title"])
+
+    def _loop(self, source, fps, width):
+        try:
+            import mss
+        except ImportError:
+            return
+        with mss.MSS() as sct:
+            while not self._stop.is_set():
+                t0 = time.perf_counter()
+                try:
+                    region = self._region(source)
+                    if region:
+                        shot = sct.grab(region)
+                        img = QImage(shot.rgb, shot.width, shot.height, shot.width * 3,
+                                     QImage.Format_RGB888)
+                        self.frame.emit(img.scaledToWidth(width, Qt.SmoothTransformation).copy())
+                except Exception:
+                    pass
+                self._stop.wait(max(0.05, 1 / fps - (time.perf_counter() - t0)))
+
+
 def list_audio_devices():
     """DirectShow audio inputs, loopback-style devices first ("Stereo Mix", "CABLE"…)."""
     if not FFMPEG_BIN.exists():
@@ -164,6 +227,9 @@ class StreamSender(QObject):
         self.running = False
         self._relay = None
         self._err_tail = []
+        self._bytes = 0             # for the live bitrate shown to the streamer
+        self._mark = (0.0, 0)
+        self._rate = 0.0
 
     def build_command(self, source, quality, encoder, audio_device):
         q = QUALITY.get(quality, QUALITY["1080p60"])
@@ -229,6 +295,7 @@ class StreamSender(QObject):
         self._relay = relay
         self.running = True
         self._err_tail = []
+        self._bytes, self._mark, self._rate = 0, (0.0, 0), 0.0
         self.proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                                      stderr=subprocess.PIPE, creationflags=NO_WINDOW)
         threading.Thread(target=self._relay_loop, args=(relay,), daemon=True).start()
@@ -253,8 +320,19 @@ class StreamSender(QObject):
                 continue
             except OSError:
                 break
+            self._bytes += len(data)
             for out in list(self.outs.values()):
                 out.push(data)
+
+    def bitrate(self):
+        """Mbit/s actually leaving the encoder right now."""
+        now = time.monotonic()
+        t0, b0 = self._mark
+        if now - t0 >= 1.0:
+            if t0:
+                self._rate = (self._bytes - b0) * 8 / (now - t0) / 1e6
+            self._mark = (now, self._bytes)
+        return self._rate
 
     def _watch_proc(self, proc):
         for raw in iter(proc.stderr.readline, b""):
