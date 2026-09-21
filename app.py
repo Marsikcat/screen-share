@@ -61,7 +61,7 @@ def _setup_logging():
 
 def main():
     missing = _missing()
-    if missing and "PySide6" not in missing:
+    if missing and "PySide6" not in missing and not getattr(sys, "frozen", False):
         _install_requirements()
         missing = _missing()
     if missing:

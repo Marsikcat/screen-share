@@ -2,14 +2,18 @@
 """
 Publish a GitHub release of МойДискорд.
 
-    python release.py                 release VERSION from HEAD (must be pushed)
-    python release.py --ref 826e3ce   release an older commit (uses that commit's VERSION)
-    python release.py --draft         create a draft to review on GitHub first
-    python release.py --dry-run       build the zip and print the notes, publish nothing
+    python tools\\release.py                release VERSION from HEAD (must be pushed)
+    python tools\\release.py --ref 826e3ce  release an older commit (uses that commit's VERSION)
+    python tools\\release.py --draft        create a draft to review on GitHub first
+    python tools\\release.py --dry-run      pack, print the notes, publish nothing
 
-Release notes come from the "## X.Y.Z" section of CHANGELOG.md. The asset
-MoyDiscord-X.Y.Z.zip (one top folder, MoyDiscord/) is what the in-app updater
-downloads. Needs git and the GitHub CLI logged in (gh auth login).
+Release notes come from the "## X.Y.Z" section of CHANGELOG.md. Two assets go up:
+
+    MoyDiscord-Setup-X.Y.Z.exe   the installer people download, and what the app
+                                 updates itself with — build it first: tools\\build.bat
+    MoyDiscord-X.Y.Z.zip         source archive, for running from Python
+
+Needs git and the GitHub CLI logged in (gh auth login).
 """
 
 import argparse
@@ -19,7 +23,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parent.parent
 REPO = "Marsikcat/screen-share"
 
 
@@ -41,6 +45,7 @@ def main():
     ap.add_argument("--ref", default="HEAD", help="коммит для релиза (по умолчанию HEAD)")
     ap.add_argument("--draft", action="store_true", help="создать черновик")
     ap.add_argument("--dry-run", action="store_true", help="только собрать архив и показать описание")
+    ap.add_argument("--no-installer", action="store_true", help="выпустить без установщика")
     args = ap.parse_args()
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")   # notes have arrows; Windows console is cp1251
 
@@ -60,13 +65,22 @@ def main():
     dist.mkdir(exist_ok=True)
     zip_path = dist / f"MoyDiscord-{version}.zip"
     git("archive", "--format=zip", "--prefix=MoyDiscord/", "-o", str(zip_path), sha)
-    print(f"{tag} ({sha[:7]}): {zip_path.name}, {zip_path.stat().st_size // 1024} КБ\n\n{notes}\n")
+    assets = [zip_path]
+    installer = dist / f"MoyDiscord-Setup-{version}.exe"
+    if installer.exists():
+        assets.insert(0, installer)          # what people download and the app updates with
+    elif not args.no_installer:
+        sys.exit(f"Нет {installer.name} — соберите установщик: tools\\build.bat "
+                 f"(или --no-installer, чтобы выпустить только исходники)")
+    for a in assets:
+        print(f"{tag} ({sha[:7]}): {a.name}, {a.stat().st_size / 1e6:.1f} МБ")
+    print(f"\n{notes}\n")
     if args.dry_run:
         return
 
     with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".md", delete=False) as f:
         f.write(notes)
-    cmd = ["gh", "release", "create", tag, str(zip_path), "--repo", REPO, "--target", sha,
+    cmd = ["gh", "release", "create", tag, *map(str, assets), "--repo", REPO, "--target", sha,
            "--title", f"МойДискорд {version}", "--notes-file", f.name]
     if args.draft:
         cmd.append("--draft")

@@ -5,11 +5,16 @@ import hashlib
 import json
 import os
 import secrets
+import sys
 from pathlib import Path
 
 APP_NAME = "МойДискорд"
-ROOT = Path(__file__).resolve().parent.parent
-VERSION = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
+# Installed build (PyInstaller): ROOT is the folder with MoyDiscord.exe, bundled files are
+# in sys._MEIPASS. From source: ROOT is the project folder.
+FROZEN = bool(getattr(sys, "frozen", False))
+ROOT = Path(sys.executable).resolve().parent if FROZEN else Path(__file__).resolve().parent.parent
+BUNDLE = Path(getattr(sys, "_MEIPASS", ROOT))
+VERSION = (BUNDLE / "VERSION").read_text(encoding="utf-8").strip()
 REPO = "Marsikcat/screen-share"
 BRANCH = "master"
 

@@ -15,3 +15,5 @@ test_nvenc.ts
 *.lnk
 *.zip
 dist/
+build/
+.build/

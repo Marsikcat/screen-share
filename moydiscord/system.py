@@ -5,7 +5,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from .config import APP_NAME, DISCOVERY_PORT, INSTANCE, PEER_PORT, ROOT
+from .config import APP_NAME, DISCOVERY_PORT, FROZEN, INSTANCE, PEER_PORT, ROOT
 
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 RUN_NAME = APP_NAME + (f"-{INSTANCE}" if INSTANCE else "")
@@ -13,6 +13,8 @@ NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 
 def _launch_command():
+    if FROZEN:
+        return f'"{sys.executable}" --autostart'
     exe = Path(sys.executable)
     pyw = exe.with_name("pythonw.exe")
     return f'"{pyw if pyw.exists() else exe}" "{ROOT / "app.py"}" --autostart'
@@ -85,3 +87,15 @@ def key_name(vk):
         pass
     return f"Клавиша {vk}"
 
+
+def classic_command():
+    """How to start the old ScreenShare window, or None if it isn't there."""
+    if FROZEN:
+        exe = ROOT / "ScreenShare.exe"
+        return [str(exe)] if exe.exists() else None
+    script = ROOT / "screen_share.py"
+    if not script.exists():
+        return None
+    exe = Path(sys.executable)
+    pyw = exe.with_name("pythonw.exe")
+    return [str(pyw if pyw.exists() else exe), str(script)]

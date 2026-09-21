@@ -1,8 +1,6 @@
 """Main window: three columns, settings overlay, tray icon, notifications."""
 
 import subprocess
-import sys
-from pathlib import Path
 
 from PySide6.QtCore import QByteArray, QRectF, Qt, QTimer
 from PySide6.QtGui import QColor, QIcon, QKeySequence, QPainter, QPixmap, QShortcut
@@ -13,6 +11,7 @@ from PySide6.QtWidgets import (QApplication, QFrame, QHBoxLayout, QLabel, QLineE
 from .. import updater
 from ..hotkeys import HotkeyManager
 from ..config import APP_NAME, ROOT
+from ..system import classic_command
 from . import dialogs, icons, theme
 from .chat import ChatView
 from .members import MemberList
@@ -321,9 +320,11 @@ class MainWindow(QMainWindow):
             self.core.start_stream(picker.source)
 
     def launch_classic(self):
-        exe = Path(sys.executable)
-        pyw = exe.with_name("pythonw.exe")
-        subprocess.Popen([str(pyw if pyw.exists() else exe), str(ROOT / "screen_share.py")], cwd=str(ROOT))
+        cmd = classic_command()
+        if cmd:
+            subprocess.Popen(cmd, cwd=str(ROOT))
+        else:
+            self.toast("Классическая демонстрация не найдена", "error")
 
     # ── notifications & tray ────────────────────────────────────────
     def toast(self, text, kind="info"):

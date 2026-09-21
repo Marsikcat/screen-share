@@ -46,11 +46,13 @@ from tkinter import ttk
 APP_NAME = "ScreenShare"
 DEFAULT_PORT = 8888
 AUDIO_PORT = 8889
-FFMPEG_DIR = Path(__file__).parent / "ffmpeg"
+# next to ScreenShare.exe when installed, next to this script when run from source
+APP_DIR = Path(sys.executable).parent if getattr(sys, "frozen", False) else Path(__file__).parent
+FFMPEG_DIR = APP_DIR / "ffmpeg"
 FFMPEG_BIN = FFMPEG_DIR / ("ffmpeg.exe" if platform.system() == "Windows" else "ffmpeg")
 FFPLAY_BIN = FFMPEG_DIR / ("ffplay.exe" if platform.system() == "Windows" else "ffplay")
 CHUNK_SIZE = 1400
-VIEWERS_FILE = Path(__file__).parent / "viewers.txt"
+VIEWERS_FILE = APP_DIR / "viewers.txt"
 
 QUALITY_PRESETS = {
     "high":   {"bitrate": "20M",  "crf": "18", "preset": "p5", "fps": "60"},
@@ -1960,7 +1962,7 @@ class ScreenShareApp:
             server.settimeout(1.0)
             self.root.after(0, lambda: self._jlog(f"TCP-сервер слушает порт {DEFAULT_PORT}"))
         except Exception as e:
-            self.root.after(0, lambda: self._jlog(f"Ошибка привязки TCP-сервера: {e}"))
+            self.root.after(0, lambda e=e: self._jlog(f"Ошибка привязки TCP-сервера: {e}"))
             server.close()
             self._tcp_server = None
             self.root.after(0, self._stop_join)
@@ -1990,7 +1992,7 @@ class ScreenShareApp:
                 self._ffplay_tcp_proc = ffplay
                 self.root.after(0, lambda: setattr(self, '_ffplay_active', True))
             except Exception as e:
-                self.root.after(0, lambda: self._jlog(f"Ошибка ffplay: {e}"))
+                self.root.after(0, lambda e=e: self._jlog(f"Ошибка ffplay: {e}"))
                 conn.close()
                 continue
 

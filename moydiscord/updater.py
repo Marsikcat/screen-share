@@ -1,4 +1,10 @@
-"""Updates from GitHub Releases: check the latest release, download its zip, restart."""
+"""
+Updates from GitHub Releases.
+
+Installed build: download MoyDiscord-Setup-X.exe from the release and run it silently —
+it replaces the app and starts it again. From source: download the source zip and copy
+it over the project folder.
+"""
 
 import io
 import json
@@ -12,7 +18,7 @@ import urllib.request
 import zipfile
 from pathlib import Path
 
-from .config import REPO, ROOT, VERSION
+from .config import FROZEN, REPO, ROOT, VERSION
 
 # never touched by an update
 SKIP = {".git", ".claude", "venv", "python", "ffmpeg", "__pycache__"}
@@ -26,7 +32,15 @@ def parse_version(v):
 
 
 def asset_name(version):
-    return f"MoyDiscord-{version}.zip"
+    return f"MoyDiscord-Setup-{version}.exe" if FROZEN else f"MoyDiscord-{version}.zip"
+
+
+def _wanted(name):
+    name = name.lower()
+    return name.endswith(".exe") and "setup" in name if FROZEN else name.endswith(".zip")
+
+
+_installer = None      # downloaded setup, run by restart()
 
 
 def _get(url, timeout=15, accept=None):
@@ -52,7 +66,7 @@ def check():
         if e.code == 404:
             raise RuntimeError("в репозитории пока нет релизов") from None
         return _check_without_api()   # 403/429: API rate limit (60 requests/hour per IP)
-    asset = next((a for a in rel.get("assets") or [] if a["name"].lower().endswith(".zip")), None)
+    asset = next((a for a in rel.get("assets") or [] if _wanted(a["name"])), None)
     extra = {"notes": rel.get("body") or "", "date": (rel.get("published_at") or "")[:10],
              "url": rel["html_url"]}
     if rel.get("name"):
@@ -84,10 +98,18 @@ def _find_root(folder):
 
 def apply(info=None):
     """Download the release archive and copy it over the app folder. Returns the new version."""
+    global _installer
     info = info or check()
-    data = _get(info["download"], timeout=180)
+    data = _get(info["download"], timeout=300)
     if info.get("size") and len(data) != info["size"]:
-        raise RuntimeError("архив скачался не полностью — попробуйте ещё раз")
+        raise RuntimeError("файл скачался не полностью — попробуйте ещё раз")
+    if FROZEN:
+        if not info["download"].lower().endswith(".exe"):
+            raise RuntimeError("в релизе нет установщика — скачайте его со страницы релизов")
+        path = Path(tempfile.gettempdir()) / asset_name(info["latest"])
+        path.write_bytes(data)
+        _installer = path
+        return info["latest"]
     tmp = Path(tempfile.mkdtemp(prefix="moydiscord-update-"))
     try:
         with zipfile.ZipFile(io.BytesIO(data)) as z:
@@ -107,6 +129,15 @@ def apply(info=None):
 
 
 def restart():
+    if FROZEN and _installer:
+        # the installer closes what's left of us, replaces the files and starts the new version
+        subprocess.Popen([str(_installer), "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART",
+                          "/CLOSEAPPLICATIONS"], creationflags=getattr(subprocess, "DETACHED_PROCESS", 0))
+        return
+    if FROZEN:
+        subprocess.Popen([sys.executable, "--restarted"], cwd=str(ROOT),
+                         creationflags=getattr(subprocess, "DETACHED_PROCESS", 0))
+        return
     exe = Path(sys.executable)
     pyw = exe.with_name("pythonw.exe")
     subprocess.Popen([str(pyw if pyw.exists() else exe), str(ROOT / "app.py"), "--restarted"], cwd=str(ROOT),
