@@ -6,8 +6,8 @@ Build the Windows app and its installer.
     python tools\\build.py      (inside an environment with requirements.txt + pyinstaller)
 
 Result:
-    dist\\MoyDiscord\\                 MoyDiscord.exe, ScreenShare.exe, ffmpeg\\, _internal\\
-    dist\\MoyDiscord-Setup-X.Y.Z.exe   installer (Inno Setup 6)
+    dist\\MarinCall\\                 MarinCall.exe, ScreenShare.exe, ffmpeg\\, _internal\\
+    dist\\MarinCall-Setup-X.Y.Z.exe   installer (Inno Setup 6)
 """
 
 import os
@@ -19,7 +19,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 BUILD = ROOT / "build"
 DIST = ROOT / "dist"
-APP_DIR = DIST / "MoyDiscord"
+APP_DIR = DIST / "MarinCall"
 
 
 def version():
@@ -36,12 +36,12 @@ def write_version_info(ver):
   kids=[
     StringFileInfo([StringTable('041904B0', [
       StringStruct('CompanyName', 'Marsikcat'),
-      StringStruct('FileDescription', 'МойДискорд — чат, голос и демонстрация экрана без серверов'),
+      StringStruct('FileDescription', 'MarinCall — чат, голос и демонстрация экрана без серверов'),
       StringStruct('FileVersion', '{ver}'),
-      StringStruct('InternalName', 'MoyDiscord'),
+      StringStruct('InternalName', 'MarinCall'),
       StringStruct('LegalCopyright', 'github.com/Marsikcat/screen-share'),
-      StringStruct('OriginalFilename', 'MoyDiscord.exe'),
-      StringStruct('ProductName', 'МойДискорд'),
+      StringStruct('OriginalFilename', 'MarinCall.exe'),
+      StringStruct('ProductName', 'MarinCall'),
       StringStruct('ProductVersion', '{ver}')])]),
     VarFileInfo([VarStruct('Translation', [0x0419, 1200])])
   ]
@@ -52,7 +52,7 @@ def write_version_info(ver):
 
 
 def pyinstaller():
-    subprocess.run([sys.executable, "-m", "PyInstaller", str(ROOT / "packaging" / "MoyDiscord.spec"),
+    subprocess.run([sys.executable, "-m", "PyInstaller", str(ROOT / "packaging" / "MarinCall.spec"),
                     "--noconfirm", "--clean", "--log-level", "WARN",
                     "--distpath", str(DIST), "--workpath", str(BUILD / "pyinstaller")],
                    check=True, cwd=ROOT)
@@ -89,7 +89,7 @@ def installer(ver):
         sys.exit("Не найден Inno Setup 6. Установите: winget install JRSoftware.InnoSetup")
     subprocess.run([str(iscc), "/Q", f"/DAppVersion={ver}", str(ROOT / "packaging" / "installer.iss")],
                    check=True, cwd=ROOT / "packaging")
-    return DIST / f"MoyDiscord-Setup-{ver}.exe"
+    return DIST / f"MarinCall-Setup-{ver}.exe"
 
 
 def size_mb(path):
@@ -100,7 +100,7 @@ def size_mb(path):
 
 def main():
     ver = version()
-    print(f"МойДискорд {ver}: сборка exe…")
+    print(f"MarinCall {ver}: сборка exe…")
     write_version_info(ver)
     pyinstaller()
     bundle_ffmpeg()

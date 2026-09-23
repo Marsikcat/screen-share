@@ -9,6 +9,7 @@ from .config import APP_NAME, DISCOVERY_PORT, FROZEN, INSTANCE, PEER_PORT, ROOT
 
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 RUN_NAME = APP_NAME + (f"-{INSTANCE}" if INSTANCE else "")
+OLD_RUN_NAME = "МойДискорд" + (f"-{INSTANCE}" if INSTANCE else "")   # before the rename
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 
@@ -21,13 +22,17 @@ def _launch_command():
 
 
 def autostart_enabled():
-    try:
-        import winreg
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY) as k:
-            winreg.QueryValueEx(k, RUN_NAME)
-            return True
-    except OSError:
-        return False
+    import winreg
+    for name in (RUN_NAME, OLD_RUN_NAME):
+        try:
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY) as k:
+                winreg.QueryValueEx(k, name)
+        except OSError:
+            continue
+        if name != RUN_NAME:
+            set_autostart(True)          # carry the old entry over to the new name
+        return True
+    return False
 
 
 def set_autostart(enabled):
@@ -35,9 +40,9 @@ def set_autostart(enabled):
     with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY, 0, winreg.KEY_SET_VALUE) as k:
         if enabled:
             winreg.SetValueEx(k, RUN_NAME, 0, winreg.REG_SZ, _launch_command())
-        else:
+        for name in ([OLD_RUN_NAME] if enabled else [RUN_NAME, OLD_RUN_NAME]):
             try:
-                winreg.DeleteValue(k, RUN_NAME)
+                winreg.DeleteValue(k, name)
             except FileNotFoundError:
                 pass
 
@@ -45,7 +50,8 @@ def set_autostart(enabled):
 def open_firewall():
     """Inbound rules for our ports. Windows shows its own UAC prompt; returns True if applied."""
     # 3.x: LAN discovery + iroh QUIC, both UDP. The 2.x TCP rule is removed.
-    cmds = [f"netsh advfirewall firewall delete rule name='{APP_NAME} TCP' | Out-Null",
+    cmds = ["netsh advfirewall firewall delete rule name='МойДискорд TCP' | Out-Null",
+            "netsh advfirewall firewall delete rule name='МойДискорд UDP' | Out-Null",
             f"netsh advfirewall firewall delete rule name='{APP_NAME} UDP' | Out-Null",
             f"netsh advfirewall firewall add rule name='{APP_NAME} UDP' dir=in action=allow "
             f"protocol=UDP localport={DISCOVERY_PORT},{PEER_PORT} profile=any | Out-Null"]

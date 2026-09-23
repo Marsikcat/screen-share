@@ -53,7 +53,7 @@ def open_file(core, meta, save=False):
             shutil.copyfile(src, dest)
         return
     # stored under its hash; give the OS a copy with the real name so it picks the right app
-    tmp = Path(tempfile.gettempdir()) / "MoyDiscord" / meta["id"]
+    tmp = Path(tempfile.gettempdir()) / "MarinCall" / meta["id"]
     tmp.mkdir(parents=True, exist_ok=True)
     target = tmp / meta["name"]
     if not target.exists():

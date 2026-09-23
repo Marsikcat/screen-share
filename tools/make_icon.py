@@ -16,7 +16,7 @@ ACCENT = "#5865f2"
 
 
 def render(size):
-    from moydiscord.ui import icons
+    from marincall.ui import icons
     pm = QPixmap(size, size)
     pm.fill(Qt.transparent)
     p = QPainter(pm)

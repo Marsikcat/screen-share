@@ -1,5 +1,5 @@
 @echo off
-:: Builds dist\MoyDiscord\ (exe) and dist\MoyDiscord-Setup-X.Y.Z.exe (installer).
+:: Builds dist\MarinCall\ (exe) and dist\MarinCall-Setup-X.Y.Z.exe (installer).
 :: Needs Python 3.10+ and Inno Setup 6 (winget install JRSoftware.InnoSetup).
 cd /d "%~dp0.."
 if not exist ".build\Scripts\python.exe" (

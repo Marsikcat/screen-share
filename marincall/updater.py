@@ -1,7 +1,7 @@
 """
 Updates from GitHub Releases.
 
-Installed build: download MoyDiscord-Setup-X.exe from the release and run it silently —
+Installed build: download MarinCall-Setup-X.exe from the release and run it silently —
 it replaces the app and starts it again. From source: download the source zip and copy
 it over the project folder.
 """
@@ -22,7 +22,7 @@ from .config import FROZEN, REPO, ROOT, VERSION
 
 # never touched by an update
 SKIP = {".git", ".claude", "venv", "python", "ffmpeg", "__pycache__"}
-UA = {"User-Agent": "MoyDiscord-updater"}
+UA = {"User-Agent": "MarinCall-updater"}
 API_LATEST = f"https://api.github.com/repos/{REPO}/releases/latest"
 RELEASES_PAGE = f"https://github.com/{REPO}/releases"
 
@@ -32,7 +32,7 @@ def parse_version(v):
 
 
 def asset_name(version):
-    return f"MoyDiscord-Setup-{version}.exe" if FROZEN else f"MoyDiscord-{version}.zip"
+    return f"MarinCall-Setup-{version}.exe" if FROZEN else f"MarinCall-{version}.zip"
 
 
 def _wanted(name):
@@ -53,7 +53,7 @@ def _result(tag, **extra):
     latest = tag.lstrip("vV")
     return {"current": VERSION, "latest": latest, "tag": tag,
             "available": parse_version(latest) > parse_version(VERSION),
-            "title": f"МойДискорд {latest}", "notes": "", "date": "", "size": 0,
+            "title": f"MarinCall {latest}", "notes": "", "date": "", "size": 0,
             "url": f"{RELEASES_PAGE}/tag/{tag}",
             "download": f"{RELEASES_PAGE}/download/{tag}/{asset_name(latest)}", **extra}
 
@@ -91,9 +91,9 @@ def _check_without_api():
 def _find_root(folder):
     """The extracted folder that holds app.py (archives wrap everything in one top dir)."""
     for cand in [folder, *[p for p in folder.iterdir() if p.is_dir()]]:
-        if (cand / "app.py").exists() and (cand / "moydiscord").is_dir():
+        if (cand / "app.py").exists() and ((cand / "marincall").is_dir() or (cand / "moydiscord").is_dir()):
             return cand
-    raise RuntimeError("архив не похож на МойДискорд — обновление отменено")
+    raise RuntimeError("архив не похож на MarinCall — обновление отменено")
 
 
 def apply(info=None):
@@ -110,7 +110,7 @@ def apply(info=None):
         path.write_bytes(data)
         _installer = path
         return info["latest"]
-    tmp = Path(tempfile.mkdtemp(prefix="moydiscord-update-"))
+    tmp = Path(tempfile.mkdtemp(prefix="marincall-update-"))
     try:
         with zipfile.ZipFile(io.BytesIO(data)) as z:
             z.extractall(tmp)

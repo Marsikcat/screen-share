@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-МойДискорд — text & voice channels and screen share over LAN / Radmin VPN, no server.
+MarinCall — text & voice channels and screen share over LAN / Radmin VPN, no server.
 
     python app.py              open the app
     python app.py --autostart  launched by Windows at logon (may start in the tray)
@@ -26,7 +26,7 @@ def _missing():
 def _message(text, icon):
     try:
         import ctypes
-        ctypes.windll.user32.MessageBoxW(None, text, "МойДискорд", icon)
+        ctypes.windll.user32.MessageBoxW(None, text, "MarinCall", icon)
     except Exception:
         print(text)
 
@@ -38,7 +38,7 @@ def _fatal(text):
 def _install_requirements():
     """After a self-update the new code may need packages the old version didn't have."""
     import subprocess
-    _message("МойДискорд обновился — доустанавливаю новые компоненты.\n"
+    _message("MarinCall обновился — доустанавливаю новые компоненты.\n"
              "Это займёт минуту, потом окно откроется само.", 0x40)
     exe = Path(sys.executable)
     py = exe.with_name("python.exe") if exe.name.lower() == "pythonw.exe" else exe
@@ -47,7 +47,7 @@ def _install_requirements():
 
 
 def _setup_logging():
-    from moydiscord.config import DATA
+    from marincall.config import DATA
     DATA.mkdir(parents=True, exist_ok=True)
     log = open(DATA / "app.log", "a", encoding="utf-8", buffering=1)
     if sys.stdout is None or sys.stderr is None:   # pythonw has no console
@@ -74,7 +74,7 @@ def main():
     from PySide6.QtNetwork import QLocalServer, QLocalSocket
     from PySide6.QtWidgets import QApplication
 
-    from moydiscord.config import APP_NAME, INSTANCE, Settings
+    from marincall.config import APP_NAME, INSTANCE, Settings
 
     args = sys.argv[1:]
     QGuiApplication.setHighDpiScaleFactorRoundingPolicy(Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
@@ -83,7 +83,7 @@ def main():
     app.setQuitOnLastWindowClosed(False)
 
     # one instance per Windows user: a second launch just brings the window up
-    key = f"MoyDiscord-{os.environ.get('USERNAME', 'user')}-{INSTANCE}"
+    key = f"MarinCall-{os.environ.get('USERNAME', 'user')}-{INSTANCE}"
     wait_until = time.time() + (15 if "--restarted" in args else 0)
     while True:
         sock = QLocalSocket()
@@ -102,7 +102,7 @@ def main():
     server.listen(key)
 
     settings = Settings()
-    from moydiscord.ui import dialogs, theme
+    from marincall.ui import dialogs, theme
     theme.apply(app, settings)
     if not settings["name"]:
         result = dialogs.onboarding(None, settings)
@@ -111,8 +111,8 @@ def main():
         settings["name"], settings["color"] = result
         settings.save()
 
-    from moydiscord.core import Core
-    from moydiscord.ui.mainwindow import MainWindow
+    from marincall.core import Core
+    from marincall.ui.mainwindow import MainWindow
 
     core = Core(settings)
     hidden = "--autostart" in args and settings["start_minimized"]

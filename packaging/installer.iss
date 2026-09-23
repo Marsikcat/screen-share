@@ -1,13 +1,13 @@
-﻿; Installer for МойДискорд (Inno Setup 6). Built by tools\build.py:
+﻿; Installer for MarinCall (Inno Setup 6). Built by tools\build.py:
 ;   ISCC /DAppVersion=X.Y.Z packaging\installer.iss
-; Per-user install (no admin rights), like Discord: %LOCALAPPDATA%\Programs\МойДискорд.
+; Per-user install (no admin rights), like Discord: %LOCALAPPDATA%\Programs\MarinCall.
 ; The in-app updater runs this silently (/VERYSILENT /CLOSEAPPLICATIONS); it then starts the app again.
 
 #ifndef AppVersion
   #define AppVersion "0.0.0"
 #endif
-#define AppName "МойДискорд"
-#define AppExe "MoyDiscord.exe"
+#define AppName "MarinCall"
+#define AppExe "MarinCall.exe"
 
 [Setup]
 AppId={{40056B9A-7955-48A4-A00A-65EF5F000482}
@@ -28,7 +28,7 @@ PrivilegesRequired=lowest
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 OutputDir=..\dist
-OutputBaseFilename=MoyDiscord-Setup-{#AppVersion}
+OutputBaseFilename=MarinCall-Setup-{#AppVersion}
 SetupIconFile=..\assets\icon.ico
 UninstallDisplayIcon={app}\{#AppExe}
 UninstallDisplayName={#AppName}
@@ -46,11 +46,15 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 Name: "autostart"; Description: "Запускать вместе с Windows"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
 
 [Files]
-Source: "..\dist\MoyDiscord\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "..\dist\MarinCall\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [InstallDelete]
 ; files of an older version that the new one no longer ships
 Type: filesandordirs; Name: "{app}\_internal"
+; the app was called МойДискорд until 3.2 — drop its exe and its shortcuts
+Type: files; Name: "{app}\MoyDiscord.exe"
+Type: files; Name: "{autoprograms}\МойДискорд.lnk"
+Type: files; Name: "{autodesktop}\МойДискорд.lnk"
 
 [Icons]
 Name: "{autoprograms}\{#AppName}"; Filename: "{app}\{#AppExe}"

@@ -78,7 +78,8 @@ def radmin_neighbours():
 # kind 0 = open room, followed by its name; kind 1 = closed room, followed by its secret.
 # No IP addresses: iroh exchanges them itself through the relay while punching NAT,
 # and on a LAN the broadcast finds the peer anyway.
-INVITE_PREFIX = "moyd-"
+INVITE_PREFIX = "marin-"
+LEGACY_PREFIX = "moyd-"        # codes made before the rename
 B58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
 N0_RELAY = re.compile(r"^https://([a-z0-9-]+)\.relay\.n0\.iroh\.link\.?/?$")
 
@@ -111,10 +112,11 @@ def make_invite(peer_id, relay, room=None, secret=None):
 
 def parse_invite(code):
     code = "".join(str(code).split())
-    if not code.startswith(INVITE_PREFIX):
-        raise ValueError("это не код приглашения МойДискорд")
+    prefix = next((p for p in (INVITE_PREFIX, LEGACY_PREFIX) if code.startswith(p)), None)
+    if not prefix:
+        raise ValueError("это не код приглашения MarinCall")
     try:
-        raw = b58decode(code[len(INVITE_PREFIX):])
+        raw = b58decode(code[len(prefix):])
         body, check = raw[:-2], raw[-2:]
         if hashlib.sha256(body).digest()[:2] != check or body[0] != 1:
             raise ValueError

@@ -8,8 +8,8 @@ import secrets
 import sys
 from pathlib import Path
 
-APP_NAME = "МойДискорд"
-# Installed build (PyInstaller): ROOT is the folder with MoyDiscord.exe, bundled files are
+APP_NAME = "MarinCall"
+# Installed build (PyInstaller): ROOT is the folder with MarinCall.exe, bundled files are
 # in sys._MEIPASS. From source: ROOT is the project folder.
 FROZEN = bool(getattr(sys, "frozen", False))
 ROOT = Path(sys.executable).resolve().parent if FROZEN else Path(__file__).resolve().parent.parent
@@ -23,7 +23,15 @@ INSTANCE = int(os.environ.get("MOYDISCORD_INSTANCE", "0") or 0)
 _OFF = INSTANCE * 100
 
 # Per Windows user, not in the project folder — the folder gets copied between PCs.
-DATA = Path(os.environ.get("APPDATA") or Path.home()) / ("MoyDiscord" + (f"-{INSTANCE}" if INSTANCE else ""))
+_APPDATA = Path(os.environ.get("APPDATA") or Path.home())
+_SUFFIX = f"-{INSTANCE}" if INSTANCE else ""
+DATA = _APPDATA / ("MarinCall" + _SUFFIX)
+_OLD_DATA = _APPDATA / ("MoyDiscord" + _SUFFIX)      # the app was called МойДискорд until 3.2
+if not DATA.exists() and _OLD_DATA.exists():
+    try:
+        _OLD_DATA.rename(DATA)                       # keep the key, history and settings
+    except OSError:
+        DATA = _OLD_DATA
 FILES_DIR = DATA / "files"
 SETTINGS_FILE = DATA / "settings.json"
 

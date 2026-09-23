@@ -436,7 +436,7 @@ class MainWindow(QMainWindow):
     def _check_updates(self):
         def done(res):
             if isinstance(res, dict) and res.get("available"):
-                self.banner_text.setText(f"Вышла новая версия МойДискорд {res['latest']}")
+                self.banner_text.setText(f"Вышла новая версия MarinCall {res['latest']}")
                 self.banner.show()
                 if self.tray and not self.isVisible():
                     self.tray.showMessage(APP_NAME, f"Доступна новая версия {res['latest']}",

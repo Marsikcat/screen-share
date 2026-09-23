@@ -1,5 +1,5 @@
 @echo off
-title MoyDiscord
+title MarinCall
 cd /d "%~dp0"
 
 :: venv made by setup.bat on this PC

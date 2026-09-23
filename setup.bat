@@ -1,11 +1,11 @@
 @echo off
-title MoyDiscord Setup
+title MarinCall Setup
 
 set "ROOT=%~dp0"
 cd /d "%ROOT%"
 
 echo ==========================================
-echo   MoyDiscord Setup
+echo   MarinCall Setup
 echo ==========================================
 echo.
 
@@ -79,7 +79,7 @@ set "PYW=%ROOT%venv\Scripts\pythonw.exe"
 venv\Scripts\python.exe -c "import PySide6, sounddevice, av" >nul 2>nul || python\python.exe -c "import PySide6, sounddevice, av" >nul 2>nul
 if errorlevel 1 (
     echo   Some packages failed to install. If the error mentions long paths, move the
-    echo   folder closer to the drive root (e.g. C:\MoyDiscord) and run setup again.
+    echo   folder closer to the drive root (e.g. C:\MarinCall) and run setup again.
 ) else (
     echo   Done
 )
@@ -109,12 +109,12 @@ if exist "ffmpeg\ffmpeg.exe" (
 :: --- Step 4: Shortcuts ---
 echo [4/4] Creating shortcuts...
 del screen_share.lnk 2>nul
-powershell -NoProfile -Command "$w=New-Object -ComObject WScript.Shell; foreach($p in @('%ROOT%MoyDiscord.lnk', [Environment]::GetFolderPath('Desktop')+'\MoyDiscord.lnk')){ $s=$w.CreateShortcut($p); $s.TargetPath='%PYW%'; $s.Arguments='\"%ROOT%app.py\"'; $s.WorkingDirectory='%ROOT%'; $s.Save() }" >nul 2>nul
-echo   Done (MoyDiscord.lnk here and on the desktop)
+powershell -NoProfile -Command "$w=New-Object -ComObject WScript.Shell; foreach($p in @('%ROOT%MarinCall.lnk', [Environment]::GetFolderPath('Desktop')+'\MarinCall.lnk')){ $s=$w.CreateShortcut($p); $s.TargetPath='%PYW%'; $s.Arguments='\"%ROOT%app.py\"'; $s.WorkingDirectory='%ROOT%'; $s.Save() }" >nul 2>nul
+echo   Done (MarinCall.lnk here and on the desktop)
 
 echo.
 echo ==========================================
-echo   Setup complete! Start: run.bat or MoyDiscord.lnk
+echo   Setup complete! Start: run.bat or MarinCall.lnk
 echo   Autostart and tray options are in Settings.
 echo ==========================================
 pause

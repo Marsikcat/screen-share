@@ -1,4 +1,4 @@
-# PyInstaller build of МойДискорд: one folder with MoyDiscord.exe and ScreenShare.exe
+# PyInstaller build of MarinCall: one folder with MarinCall.exe and ScreenShare.exe
 # sharing the same libraries. Run through tools/build.py, which also writes the version
 # resource this spec expects and wraps the result into an installer.
 # -*- mode: python ; coding: utf-8 -*-
@@ -39,11 +39,11 @@ DROP = ("opengl32sw.dll", "_avif.")
 for a in (app, classic):
     a.binaries = [b for b in a.binaries if not any(d in b[0].lower() for d in DROP)]
 
-app_exe = EXE(PYZ(app.pure), app.scripts, [], exclude_binaries=True, name="MoyDiscord",
+app_exe = EXE(PYZ(app.pure), app.scripts, [], exclude_binaries=True, name="MarinCall",
               console=False, icon=ICON, version=VERSION_INFO, upx=False)
 classic_exe = EXE(PYZ(classic.pure), classic.scripts, [], exclude_binaries=True, name="ScreenShare",
                   console=False, icon=ICON, version=VERSION_INFO, upx=False)
 
 COLLECT(app_exe, app.binaries, app.datas,
         classic_exe, classic.binaries, classic.datas,
-        name="MoyDiscord", upx=False)
+        name="MarinCall", upx=False)

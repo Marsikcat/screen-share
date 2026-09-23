@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Publish a GitHub release of МойДискорд.
+Publish a GitHub release of MarinCall.
 
     python tools\\release.py                release VERSION from HEAD (must be pushed)
     python tools\\release.py --ref 826e3ce  release an older commit (uses that commit's VERSION)
@@ -9,9 +9,9 @@ Publish a GitHub release of МойДискорд.
 
 Release notes come from the "## X.Y.Z" section of CHANGELOG.md. Two assets go up:
 
-    MoyDiscord-Setup-X.Y.Z.exe   the installer people download, and what the app
+    MarinCall-Setup-X.Y.Z.exe   the installer people download, and what the app
                                  updates itself with — build it first: tools\\build.bat
-    MoyDiscord-X.Y.Z.zip         source archive, for running from Python
+    MarinCall-X.Y.Z.zip         source archive, for running from Python
 
 Needs git and the GitHub CLI logged in (gh auth login).
 """
@@ -41,7 +41,7 @@ def notes_for(version):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Выпустить релиз МойДискорд на GitHub")
+    ap = argparse.ArgumentParser(description="Выпустить релиз MarinCall на GitHub")
     ap.add_argument("--ref", default="HEAD", help="коммит для релиза (по умолчанию HEAD)")
     ap.add_argument("--draft", action="store_true", help="создать черновик")
     ap.add_argument("--dry-run", action="store_true", help="только собрать архив и показать описание")
@@ -63,10 +63,10 @@ def main():
 
     dist = ROOT / "dist"
     dist.mkdir(exist_ok=True)
-    zip_path = dist / f"MoyDiscord-{version}.zip"
-    git("archive", "--format=zip", "--prefix=MoyDiscord/", "-o", str(zip_path), sha)
+    zip_path = dist / f"MarinCall-{version}.zip"
+    git("archive", "--format=zip", "--prefix=MarinCall/", "-o", str(zip_path), sha)
     assets = [zip_path]
-    installer = dist / f"MoyDiscord-Setup-{version}.exe"
+    installer = dist / f"MarinCall-Setup-{version}.exe"
     if installer.exists():
         assets.insert(0, installer)          # what people download and the app updates with
     elif not args.no_installer:
@@ -81,7 +81,7 @@ def main():
     with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".md", delete=False) as f:
         f.write(notes)
     cmd = ["gh", "release", "create", tag, *map(str, assets), "--repo", REPO, "--target", sha,
-           "--title", f"МойДискорд {version}", "--notes-file", f.name]
+           "--title", f"MarinCall {version}", "--notes-file", f.name]
     if args.draft:
         cmd.append("--draft")
     subprocess.run(cmd, check=True)

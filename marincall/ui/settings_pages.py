@@ -125,7 +125,7 @@ def page_hotkeys(view, v):
                       "перехватываются — игра их тоже получит. Можно назначить кнопки мыши 4/5 и "
                       "одиночный модификатор (например, левый Ctrl для рации).", "muted", wrap=True))
     v.addWidget(switch_row("Работать вне окна приложения", "Выключите, если сочетания мешают в других "
-                           "программах, — тогда они будут действовать только в окне МойДискорд.",
+                           "программах, — тогда они будут действовать только в окне MarinCall.",
                            s["hotkeys_global"], lambda on: (s.__setitem__("hotkeys_global", on), s.save())))
     v.addWidget(section("Голосовая связь и демонстрация"))
     for action, (title, hint) in hotkeys.ACTIONS.items():
@@ -144,7 +144,7 @@ def page_hotkeys(view, v):
         h.addLayout(col, 1)
         h.addWidget(BindButton(view, action), 0, Qt.AlignVCenter)
         v.addWidget(row)
-    v.addWidget(section("Внутри приложения", "Работают, когда окно МойДискорд активно."))
+    v.addWidget(section("Внутри приложения", "Работают, когда окно MarinCall активно."))
     grid = QGridLayout()
     grid.setVerticalSpacing(8)
     grid.setHorizontalSpacing(24)
@@ -573,7 +573,7 @@ def page_updates(view, v):
 
     def do_apply():
         apply_btn.setEnabled(False)
-        status.setText(f"Скачиваю МойДискорд {last.get('latest', '')}…")
+        status.setText(f"Скачиваю MarinCall {last.get('latest', '')}…")
         info = dict(last)
         view._apply_bridge = run_async(lambda: updater.apply(info or None), applied)
 
