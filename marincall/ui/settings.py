@@ -84,28 +84,29 @@ class ThemeCard(QToolButton):
         self.setCursor(Qt.PointingHandCursor)
         self.setToolTip(THEMES[key]["label"] if key in THEMES else "Как в Windows")
 
+    @staticmethod
+    def _preview(p, r, th):
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(th["main"]))
+        p.drawRoundedRect(r, 8, 8)
+        p.setBrush(QColor(th["side"]))
+        p.drawRoundedRect(r.adjusted(8, 10, -r.width() // 2, -10), 4, 4)
+        p.setBrush(QColor(T.c["accent"]))
+        p.drawRoundedRect(r.adjusted(r.width() // 2 + 4, 14, -8, -r.height() + 22), 3, 3)
+
     def paintEvent(self, _):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
         r = self.rect().adjusted(3, 3, -3, -25)
         if self.key == "system":
-            left, right = THEMES["light"], THEMES["dark"]
-            p.setPen(Qt.NoPen)
-            p.setBrush(QColor(left["main"]))
-            p.drawRoundedRect(r, 8, 8)
-            p.setBrush(QColor(right["main"]))
-            p.setClipRect(r.adjusted(r.width() // 2, 0, 0, 0))
-            p.drawRoundedRect(r, 8, 8)
+            half = r.width() // 2
+            p.setClipRect(r.adjusted(0, 0, -half, 0))
+            self._preview(p, r, THEMES["light"])
+            p.setClipRect(r.adjusted(r.width() - half, 0, 0, 0))
+            self._preview(p, r, THEMES["dark"])
             p.setClipping(False)
         else:
-            th = THEMES[self.key]
-            p.setPen(Qt.NoPen)
-            p.setBrush(QColor(th["main"]))
-            p.drawRoundedRect(r, 8, 8)
-            p.setBrush(QColor(th["side"]))
-            p.drawRoundedRect(r.adjusted(8, 10, -r.width() // 2, -10), 4, 4)
-            p.setBrush(QColor(T.c["accent"]))
-            p.drawRoundedRect(r.adjusted(r.width() // 2 + 4, 14, -8, -r.height() + 22), 3, 3)
+            self._preview(p, r, THEMES[self.key])
         pen_c = QColor(T.c["accent"] if self.sel else T.c["divider"])
         p.setPen(QPen(pen_c, 3 if self.sel else 1))
         p.setBrush(Qt.NoBrush)
@@ -343,7 +344,7 @@ class SettingsView(QWidget):
                                "только значок возле часов.", self.s["start_minimized"],
                                lambda on: self._set("start_minimized", on)))
         v.addWidget(section("Системный трей"))
-        v.addWidget(switch_row("Сворачивать в трей при закрытии", "Кнопка ✕ прячет окно в трей, "
+        v.addWidget(switch_row("Сворачивать в трей при закрытии", "Крестик в углу окна прячет его в трей, "
                                "а голосовой канал и сообщения продолжают работать. Выйти — через "
                                "меню значка в трее.", self.s["close_to_tray"],
                                lambda on: self._set("close_to_tray", on)))

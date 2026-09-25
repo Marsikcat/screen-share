@@ -9,9 +9,20 @@ from PySide6.QtWidgets import (QButtonGroup, QComboBox, QDialog, QFrame, QGridLa
                                QVBoxLayout, QWidget)
 
 from .. import stream
-from . import icons
+from . import icons, theme
 from .theme import T, mix
 from .widgets import Avatar, button, label
+
+
+def _clear(layout):
+    while layout.count():
+        it = layout.takeAt(0)
+        if it.widget():
+            it.widget().hide()              # gone at once, not on the next event loop pass
+            it.widget().deleteLater()
+        elif it.layout():
+            _clear(it.layout())
+            it.layout().deleteLater()
 
 
 class Tile(QFrame):
@@ -65,7 +76,7 @@ class Tile(QFrame):
             lay.addLayout(row)
         lay.addStretch(1)
         bottom = QHBoxLayout()
-        name = QLabel(m["name"] + ("  (вы)" if uid == self.core.me else ""))
+        name = QLabel(m["name"] + (" (вы)" if uid == self.core.me else ""))
         name.setStyleSheet("background: rgba(0,0,0,0.45); color: white; border-radius: 4px;"
                            "padding: 3px 8px; font-weight: 600;")
         bottom.addWidget(name)
@@ -143,15 +154,19 @@ class VoiceView(QWidget):
         h.addStretch(1)
         lay.addWidget(header)
 
+        stage_bg = T.c["rail"] if not T.light else T.c["side"]
         self.stage = QWidget()
-        self.stage.setStyleSheet(f"background: {T.c['rail'] if not T.light else T.c['side']};")
-        self.grid = QGridLayout(self.stage)
+        self.stage.setObjectName("Stage")
+        self.stage.setAttribute(Qt.WA_StyledBackground, True)
+        self.stage.setStyleSheet(f"#Stage {{ background: {stage_bg}; }}")
+        self.grid = QVBoxLayout(self.stage)          # rows of tiles, each row centred
         self.grid.setContentsMargins(24, 24, 24, 24)
         self.grid.setSpacing(12)
         lay.addWidget(self.stage, 1)
 
         self.controls = QFrame()
-        self.controls.setStyleSheet(f"background: {T.c['rail'] if not T.light else T.c['side']};")
+        self.controls.setObjectName("VoiceControls")
+        self.controls.setStyleSheet(f"#VoiceControls {{ background: {stage_bg}; }}")
         c = QHBoxLayout(self.controls)
         c.setContentsMargins(0, 8, 0, 20)
         c.setSpacing(14)
@@ -206,25 +221,30 @@ class VoiceView(QWidget):
         if not ch:
             return
         self.title.setText(ch["name"])
-        while self.grid.count():
-            it = self.grid.takeAt(0)
-            if it.widget():
-                it.widget().deleteLater()
+        _clear(self.grid)
         self.tiles = {}
         joined = self.core.my_voice == self.cid
         uids = self.core.voice_members(self.cid)
+        self.grid.addStretch(1)
         if not joined:
-            self.grid.addWidget(self._invite(ch, uids), 0, 0, Qt.AlignCenter)
+            self.grid.addWidget(self._invite(ch, uids), 0, Qt.AlignHCenter)
         else:
             cols = max(1, min(4, math.ceil(math.sqrt(len(uids)))))
-            for i, uid in enumerate(uids):
-                t = Tile(self, uid)
-                if uid == self.core.me and self.core.sender.running:
-                    t.set_preview(self.preview)
-                self.tiles[uid] = t
-                self.grid.addWidget(t, i // cols, i % cols, Qt.AlignCenter)
+            for start in range(0, len(uids), cols):
+                row = QHBoxLayout()
+                row.setSpacing(12)
+                row.addStretch(1)
+                for uid in uids[start:start + cols]:
+                    t = Tile(self, uid)
+                    if uid == self.core.me and self.core.sender.running:
+                        t.set_preview(self.preview)
+                    self.tiles[uid] = t
+                    row.addWidget(t)
+                row.addStretch(1)
+                self.grid.addLayout(row)
             self._cols = cols
             self._size_tiles()
+        self.grid.addStretch(1)
         self.controls.setVisible(joined)
         s = self.core.s
         self._paint_round(self.b_mic, "mic_off" if s["muted"] or s["deafened"] else "mic",
@@ -340,6 +360,7 @@ class SourcePicker(QDialog):
 
         screens = QWidget()
         grid = QGridLayout(screens)
+        grid.setContentsMargins(0, 4, 0, 0)
         grid.setSpacing(12)
         self.mon_group = QButtonGroup(self)
         self.monitors = stream.list_monitors()
@@ -359,6 +380,7 @@ class SourcePicker(QDialog):
             grid.addWidget(b, i // 2, i % 2)
             if i == 0:
                 b.setChecked(True)
+        grid.setRowStretch(math.ceil(len(self.monitors) / 2), 1)    # thumbnails stay at the top
         self.pages.addWidget(screens)
         self.win_list = QListWidget()
         for w in stream.list_windows(exclude_titles=(parent.windowTitle(),)):
@@ -394,6 +416,10 @@ class SourcePicker(QDialog):
         go.setMinimumHeight(38)
         row.addWidget(go)
         v.addLayout(row)
+
+    def showEvent(self, e):
+        super().showEvent(e)
+        theme.style_window(self)
 
     def _accept(self):
         if self.pages.currentIndex() == 0:

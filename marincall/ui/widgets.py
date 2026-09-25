@@ -2,7 +2,7 @@
 
 from PySide6.QtCore import (Property, QEasingCurve, QPoint, QPropertyAnimation, QRect, QRectF,
                             QSize, Qt, QTimer, Signal)
-from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen
+from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath
 from PySide6.QtWidgets import (QAbstractButton, QFrame, QGraphicsOpacityEffect, QHBoxLayout,
                                QLabel, QLayout, QPushButton, QSizePolicy, QToolButton, QWidget)
 
@@ -65,7 +65,6 @@ class Avatar(QWidget):
         self._name, self._color, self._size = name, color, size
         self.speaking = False
         self.status = None      # None | "online" | "offline"
-        self.ring_bg = None     # colour behind the status dot (cut-out)
         pad = 3 if size < 60 else 5
         self.setFixedSize(size + pad * 2, size + pad * 2)
         self._pad = pad
@@ -86,31 +85,52 @@ class Avatar(QWidget):
     def paintEvent(self, _):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
+        p.setPen(Qt.NoPen)
         s, pad = self._size, self._pad
         rect = QRectF(pad, pad, s, s)
+        # the presence dot sits in a transparent notch (like Discord), so it looks right on
+        # any background: hover, selection, every theme
+        dot = hole = None
+        if self.status:
+            d = max(8.0, round(s * 0.3))
+            gap = max(2.0, round(s * 0.08))
+            c = min(pad + s * 0.85, self.width() - d / 2 - gap)
+            dot = QRectF(c - d / 2, c - d / 2, d, d)
+            hole = QPainterPath()
+            hole.addEllipse(dot.adjusted(-gap, -gap, gap, gap))
         if self.speaking:
-            p.setPen(QPen(QColor(T.c["green"]), max(2, s // 16)))
-            p.setBrush(Qt.NoBrush)
-            p.drawEllipse(rect.adjusted(-pad + 1, -pad + 1, pad - 1, pad - 1))
-        p.setPen(Qt.NoPen)
+            w = max(2.0, s / 16)
+            r = s / 2 + pad - w / 2 - 0.5
+            ring = QPainterPath()
+            ring.addEllipse(rect.center(), r + w / 2, r + w / 2)
+            inner = QPainterPath()
+            inner.addEllipse(rect.center(), r - w / 2, r - w / 2)
+            ring = ring.subtracted(inner)
+            p.setBrush(QColor(T.c["green"]))
+            p.drawPath(ring.subtracted(hole) if hole else ring)
+        body = QPainterPath()
+        body.addEllipse(rect)
+        if hole:
+            body = body.subtracted(hole)
         p.setBrush(QColor(self._color))
-        p.drawEllipse(rect)
+        p.drawPath(body)
         f = QFont(p.font())
         f.setPixelSize(max(9, int(s * 0.42)))
         f.setWeight(QFont.DemiBold)
         p.setFont(f)
         p.setPen(QColor("#ffffff"))
         p.drawText(rect, Qt.AlignCenter, (self._name[:1] or "?").upper())
-        if self.status:
-            d = max(8, s // 3)
-            dot = QRectF(pad + s - d * 0.85, pad + s - d * 0.85, d, d)
-            p.setBrush(QColor(self.ring_bg or T.c["side"]))
-            p.drawEllipse(dot.adjusted(-2.5, -2.5, 2.5, 2.5))
+        if dot:
+            p.setPen(Qt.NoPen)
+            mark = QPainterPath()
+            mark.addEllipse(dot)
+            if self.status == "offline":        # hollow grey ring
+                k = dot.width() * 0.27
+                inner = QPainterPath()
+                inner.addEllipse(dot.adjusted(k, k, -k, -k))
+                mark = mark.subtracted(inner)
             p.setBrush(QColor(T.c["green"] if self.status == "online" else T.c["muted"]))
-            p.drawEllipse(dot)
-            if self.status == "offline":
-                p.setBrush(QColor(self.ring_bg or T.c["side"]))
-                p.drawEllipse(dot.adjusted(d * 0.3, d * 0.3, -d * 0.3, -d * 0.3))
+            p.drawPath(mark)
 
 
 class IconButton(QToolButton):
@@ -275,11 +295,13 @@ class Toast(QLabel):
         self._timer = QTimer(self, singleShot=True, timeout=self._fade)
 
     def show_text(self, text, kind="info"):
-        bg = T.c["red"] if kind == "error" else T.c["float"]
+        # always a dark pill with white text (the light theme's "float" is white)
+        bg = T.c["red"] if kind == "error" else ("#313338" if T.light else T.c["float"])
         self.setStyleSheet(f"background: {bg}; color: white; border-radius: 8px; padding: 10px 16px;"
                            f"font-weight: 600;")
         self.setText(text)
-        w = min(520, self.parent().width() - 40)
+        self.ensurePolished()               # the bold style-sheet font, for the measurement below
+        w = min(520, self.parent().width() - 40, self.fontMetrics().horizontalAdvance(text) + 48)
         self.setFixedWidth(w)
         self.adjustSize()
         self.move((self.parent().width() - w) // 2, self.parent().height() - self.height() - 90)
@@ -350,5 +372,5 @@ class LevelMeter(QWidget):
             p.setBrush(QColor(T.c["green"]))
             p.drawRect(QRectF(th, bar.y(), lv - th, 10))
         p.setClipping(False)
-        p.setBrush(QColor("white"))
+        p.setBrush(QColor(T.c["header"] if T.light else "white"))   # visible on a light bar too
         p.drawRoundedRect(QRectF(th - 3, 2, 6, h - 4), 3, 3)

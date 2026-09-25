@@ -23,6 +23,7 @@ EMOJI = {
               "🥤 🚀 🛸 🚗 🏠 ⏰ 💡 📌 📎 🔒 🔑 💰 🐱 🐶 🦊 🐸 🐧 🦄",
 }
 QUICK_REACTIONS = ["👍", "❤️", "😂", "😮", "😢", "🔥"]
+NNBSP = "\u202f"        # narrow no-break space: the "padding" of inline code and mention pills
 
 
 def _placeholder(store, value):
@@ -44,6 +45,11 @@ def render(text, my_name=""):
     out = []
     parts = re.split(r"```(?:[\w+-]*\n)?(.*?)```", text, flags=re.S)
     for i, part in enumerate(parts):
+        if not i % 2:       # the line break next to a code block is the block's own edge
+            if i > 0:
+                part = part.removeprefix("\n")
+            if i < len(parts) - 1:
+                part = part.removesuffix("\n")
         if i % 2:
             body = html.escape(part.strip("\n"))
             out.append(f'<table width="100%" cellpadding="8" style="background-color:{c["code"]}; '
@@ -59,19 +65,22 @@ def _inline(s, my_name):
     keep = []
     s = re.sub(r"`([^`\n]+)`", lambda m: _placeholder(
         keep, f'<span style="font-family:Consolas,monospace; background-color:{c["code"]}">'
-              f'&nbsp;{html.escape(m.group(1))}&nbsp;</span>'), s)
+              f'{NNBSP}{html.escape(m.group(1))}{NNBSP}</span>'), s)
     s = URL_RE.sub(lambda m: _placeholder(
-        keep, f'<a href="{html.escape(m.group(0), quote=True)}" style="color:#00a8fc; '
+        keep, f'<a href="{html.escape(m.group(0), quote=True)}" style="color:{c["link"]}; '
               f'text-decoration:none">{html.escape(m.group(0))}</a>'), s)
     s = html.escape(s, quote=False)
 
     def mention(m):
         name = m.group(1)
         mine = my_name and name.lower() in (my_name.lower(), "все", "everyone")
-        bg = mix(c["main"], c["yellow"] if mine else c["accent"], 0.28)
-        fg = c["header"] if mine else mix(c["accent"], "#ffffff", 0.45)
+        bg = mix(c["main"], c["yellow"] if mine else c["accent"], 0.28 if not T.light else 0.2)
+        if mine:
+            fg = c["header"]
+        else:           # readable on both: lighter accent on dark, deeper accent on light
+            fg = mix(c["accent"], "#000000", 0.2) if T.light else mix(c["accent"], "#ffffff", 0.45)
         return _placeholder(keep, f'<span style="background-color:{bg}; color:{fg}; '
-                                  f'font-weight:600">&nbsp;@{name}&nbsp;</span>')
+                                  f'font-weight:600">{NNBSP}@{name}{NNBSP}</span>')
 
     s = MENTION_RE.sub(mention, s)
     s = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", s)

@@ -4,6 +4,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QDialog, QHBoxLayout, QLineEdit, QVBoxLayout
 
 from ..config import APP_NAME, PALETTE
+from . import theme
 from .settings import ColorDot
 from .theme import T
 from .widgets import Avatar, button, label
@@ -21,6 +22,10 @@ class Dialog(QDialog):
         self.v.addWidget(label(title, "h2"))
         if text:
             self.v.addWidget(label(text, "muted", wrap=True))
+
+    def showEvent(self, e):
+        super().showEvent(e)
+        theme.style_window(self)            # dark title bar in the dark themes
 
     def buttons(self, ok_text, kind=None, cancel=True):
         row = QHBoxLayout()
@@ -236,12 +241,13 @@ class JoinDialog(Dialog):
         self.core, self.win = core, parent
         self.v.addWidget(label("Вставьте код приглашения, который прислал друг.", "muted", wrap=True))
         self.box = QPlainTextEdit()
-        self.box.setPlaceholderText("moyd-…")
+        self.box.setPlaceholderText("marin-…")
         self.box.setFixedHeight(64)
         self.box.setStyleSheet("font-family: Consolas;")
         self.v.addWidget(self.box)
         self.error = label("", "hint", wrap=True)
         self.error.setStyleSheet(f"color: {T.c['red']};")
+        self.error.hide()
         self.v.addWidget(self.error)
         ok = self.buttons("Присоединиться")
         ok.clicked.disconnect()
@@ -252,6 +258,7 @@ class JoinDialog(Dialog):
             restart = self.core.join_invite(self.box.toPlainText())
         except ValueError as e:
             self.error.setText(str(e).capitalize())
+            self.error.show()
             return
         self.accept()
         if restart:

@@ -20,11 +20,10 @@ class MemberRow(QFrame):
         lay.setSpacing(10)
         av = Avatar(m["name"], m["color"], 32)
         av.status = "online" if m["online"] else "offline"
-        av.ring_bg = T.c["side"]
         lay.addWidget(av)
         col = QVBoxLayout()
         col.setSpacing(0)
-        name = QLabel(elide(m["name"], 20) + ("  (вы)" if m["uid"] == core.me else ""))
+        name = QLabel(elide(m["name"], 20) + (" (вы)" if m["uid"] == core.me else ""))
         name.setStyleSheet(f"color: {readable(m['color']) if m['online'] else T.c['muted']};"
                            f"font-weight: 600;")
         col.addWidget(name)

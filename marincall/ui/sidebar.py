@@ -100,9 +100,11 @@ class VoiceMemberRow(QFrame):
         lay.addWidget(name, 1)
         if st.get("streaming"):
             live = QLabel("В ЭФИРЕ")
+            live.setAlignment(Qt.AlignCenter)
+            live.setFixedHeight(T.px(16))
             live.setStyleSheet(f"background: {T.c['red']}; color: white; border-radius: 4px;"
-                               f"font-size: {T.px(7)}pt; font-weight: 800; padding: 1px 5px;")
-            lay.addWidget(live)
+                               f"font-size: {T.px(7)}pt; font-weight: 800; padding: 0 5px;")
+            lay.addWidget(live, 0, Qt.AlignVCenter)
         for flag, icon_name in (("muted", "mic_off"), ("deafened", "headphones_off")):
             if st.get(flag):
                 ic = QLabel()
@@ -423,8 +425,8 @@ class Sidebar(QWidget):
         h.setSpacing(2)
         self.me_avatar = Avatar(self.core.s["name"], self.core.s["color"], 32)
         self.me_avatar.status = "online"
-        self.me_avatar.ring_bg = T.c["rail"] if not T.light else "#ebedef"
         h.addWidget(self.me_avatar)
+        h.addSpacing(6)
         info = QVBoxLayout()
         info.setSpacing(0)
         self.me_name = QLabel()
@@ -453,8 +455,10 @@ class Sidebar(QWidget):
         s = self.core.s
         self.me_avatar.set(s["name"], s["color"])
         self.me_name.setText(elide(s["name"] or "Без имени", 16))
-        n = len(self.core.mesh.peers())
-        self.me_sub.setText(f"В сети · рядом {n}" if n else "В сети · вы одни")
+        peers = self.core.mesh.peers()
+        self.me_sub.setText(f"На связи: {len(peers)}" if peers else "Вы пока одни")
+        self.me_sub.setToolTip("Соединены с: " + ", ".join(self.core.name_of(u) for u in peers)
+                               if peers else "Никто из комнаты сейчас не в сети")
         muted = s["muted"] or s["deafened"]
         self.mic_btn.setChecked(muted)
         self.mic_btn.set_icon("mic_off" if muted else "mic")

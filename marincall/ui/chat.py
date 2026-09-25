@@ -107,6 +107,7 @@ class MessageList(QScrollArea):
         while self.col.count() > 1:
             item = self.col.takeAt(1)
             if item.widget():
+                item.widget().hide()        # no flash of the old channel before deletion
                 item.widget().deleteLater()
         self.shown = []
 
@@ -183,12 +184,18 @@ class MessageList(QScrollArea):
     def refresh_message(self, mid):
         w = self.widget_for(mid)
         if w and not w.editing:
+            stick = self.at_bottom()
             w.refresh()
+            if stick:                       # a reaction or an edit made the message taller
+                self.scroll_bottom()
 
     def refresh_files(self, fid):
+        stick = self.at_bottom()
         for m, w in self.shown:
             if any(f["id"] == fid for f in m["files"]):
                 w.refresh()
+        if stick:                           # a picture arrived and pushed the chat up
+            self.scroll_bottom()
 
     def jump_to(self, mid):
         w = self.widget_for(mid)

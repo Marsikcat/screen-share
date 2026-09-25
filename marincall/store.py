@@ -25,6 +25,10 @@ UID_RE = re.compile(r"^[0-9a-f]{64}$")           # ed25519 public key
 LEGACY_UID_RE = re.compile(r"^[0-9a-f]{24}$")    # 2.x random ids
 SIG_RE = re.compile(r"^[0-9a-f]{128}$")
 FILE_ID_RE = re.compile(r"^[0-9a-f]{32}$")
+# message and channel ids are "<author>:<seq>" — longer than the 64-hex key itself.
+# 3.0–3.2 cut them to 64 characters, which broke replies, reactions, edits, deletes and
+# messages in user-created channels.
+ID_LIMIT = 96
 KINDS = {"msg", "edit", "del", "react", "ch_new", "ch_ren", "ch_del", "profile", "room"}
 
 # Fixed ids so every peer has the same starter channels without coordination.
@@ -74,9 +78,9 @@ def validate(ev, legacy=False, need_sig=True):
             return None
         out["sig"] = ev["sig"]
     if k == "msg":
-        out["ch"] = clean(ev.get("ch"), 64)
+        out["ch"] = clean(ev.get("ch"), ID_LIMIT)
         out["text"] = clean(ev.get("text"), MAX_TEXT)
-        out["reply"] = clean(ev.get("reply"), 64) or None
+        out["reply"] = clean(ev.get("reply"), ID_LIMIT) or None
         files = []
         for f in (ev.get("files") or [])[:10]:
             if isinstance(f, dict) and FILE_ID_RE.match(str(f.get("id", ""))):
@@ -86,7 +90,7 @@ def validate(ev, legacy=False, need_sig=True):
         if not out["ch"] or not (out["text"] or files):
             return None
     elif k in ("edit", "del", "react", "ch_ren", "ch_del"):
-        out["target"] = clean(ev.get("target"), 64)
+        out["target"] = clean(ev.get("target"), ID_LIMIT)
         if not out["target"]:
             return None
         if k == "edit":

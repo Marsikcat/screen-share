@@ -5,8 +5,8 @@ import shutil
 import tempfile
 from pathlib import Path
 
-from PySide6.QtCore import QSize, Qt, QUrl, Signal
-from PySide6.QtGui import QColor, QDesktopServices, QPalette, QPixmap
+from PySide6.QtCore import QRectF, QSize, Qt, QUrl, Signal
+from PySide6.QtGui import QBrush, QColor, QDesktopServices, QPainter, QPalette, QPixmap
 from PySide6.QtWidgets import (QFileDialog, QFrame, QHBoxLayout, QLabel, QPlainTextEdit,
                                QToolButton, QVBoxLayout, QWidget)
 
@@ -40,6 +40,19 @@ def day_title(ts):
 def readable(color):
     """Name colours must stay readable on the light theme too."""
     return mix(color, "#000000", 0.25) if T.light else mix(color, "#ffffff", 0.25)
+
+
+def rounded(pm, radius):
+    """Picture with rounded corners, like Discord's attachments."""
+    out = QPixmap(pm.size())
+    out.fill(Qt.transparent)
+    p = QPainter(out)
+    p.setRenderHint(QPainter.Antialiasing)
+    p.setPen(Qt.NoPen)
+    p.setBrush(QBrush(pm))
+    p.drawRoundedRect(QRectF(0, 0, pm.width(), pm.height()), radius, radius)
+    p.end()
+    return out
 
 
 def open_file(core, meta, save=False):
@@ -206,6 +219,7 @@ class MessageWidget(QFrame):
                 if not src.isNull():
                     pm = src.scaled(QSize(420, 320), Qt.KeepAspectRatio, Qt.SmoothTransformation) \
                         if src.width() > 420 or src.height() > 320 else src
+                    pm = rounded(pm, 8)
                     _thumbs[meta["id"]] = pm
             if pm is not None:
                 lb = QLabel()
@@ -230,7 +244,7 @@ class MessageWidget(QFrame):
         h.addWidget(ic)
         info = QVBoxLayout()
         info.setSpacing(0)
-        name = QLabel(f"<span style='color:#00a8fc'>{richtext.html.escape(meta['name'])}</span>")
+        name = QLabel(f"<span style='color:{c['link']}'>{richtext.html.escape(meta['name'])}</span>")
         size = QLabel(human_size(meta["size"]) if path else "Загрузка у участников…")
         size.setProperty("role", "hint")
         info.addWidget(name)
@@ -254,8 +268,9 @@ class MessageWidget(QFrame):
         box.setFixedHeight(max(44, min(200, int(box.document().size().height() * 20) + 24)))
         box.save.connect(self._save_edit)
         box.cancel.connect(self._cancel_edit)
-        hint = QLabel("Esc — <span style='color:#00a8fc'>отмена</span> • Enter — "
-                      "<span style='color:#00a8fc'>сохранить</span>")
+        link = T.c["link"]
+        hint = QLabel(f"Esc — <span style='color:{link}'>отмена</span> • Enter — "
+                      f"<span style='color:{link}'>сохранить</span>")
         hint.setProperty("role", "hint")
         self.col.addWidget(box)
         self.col.addWidget(hint)
@@ -280,7 +295,7 @@ class MessageWidget(QFrame):
     def _set_bg(self, hover):
         pal = self.palette()
         if self._mention:
-            color = mix(T.c["main"], T.c["yellow"], 0.13 if hover else 0.09)
+            color = mix(T.c["main"], T.c["yellow"], 0.16 if hover else 0.12)
         else:
             color = T.c["msg_hover"] if hover else T.c["main"]
         pal.setColor(QPalette.Window, QColor(color))
@@ -288,6 +303,12 @@ class MessageWidget(QFrame):
         if self.time_lb:
             self.time_lb.setStyleSheet(
                 f"color: {T.c['muted'] if hover else 'transparent'}; font-size: {T.px(7)}pt;")
+
+    def paintEvent(self, e):
+        super().paintEvent(e)
+        if self._mention:                   # Discord's yellow bar on messages that mention you
+            p = QPainter(self)
+            p.fillRect(0, 0, 2, self.height(), QColor(T.c["yellow"]))
 
     def enterEvent(self, e):
         self._set_bg(True)

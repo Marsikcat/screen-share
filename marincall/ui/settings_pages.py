@@ -121,6 +121,7 @@ class BindButton(QWidget):
 def page_hotkeys(view, v):
     s = view.s
     v.addWidget(label("Горячие клавиши", "h2"))
+    v.addSpacing(6)
     v.addWidget(label("Сочетания ниже работают, даже когда окно свёрнуто или вы в игре. Клавиши не "
                       "перехватываются — игра их тоже получит. Можно назначить кнопки мыши 4/5 и "
                       "одиночный модификатор (например, левый Ctrl для рации).", "muted", wrap=True))
@@ -186,21 +187,23 @@ def page_voice(view, v):
     grid.addWidget(label("УСТРОЙСТВО ВЫВОДА", "caption"), 0, 1)
     grid.addWidget(combo(ins, s["input_device"], "input_device", core.voice.restart_input), 1, 0)
     grid.addWidget(combo(outs, s["output_device"], "output_device", core.voice.restart_output), 1, 1)
-    grid.addWidget(slider_row("Громкость микрофона", s["input_volume"], 0, 200,
-                              lambda x: s.__setitem__("input_volume", x)), 2, 0)
-    grid.addWidget(slider_row("Громкость звука", s["output_volume"], 0, 200,
-                              lambda x: s.__setitem__("output_volume", x)), 2, 1)
+    for col, (title, key) in enumerate((("Громкость микрофона", "input_volume"),
+                                        ("Громкость звука", "output_volume"))):
+        row = slider_row(title, s[key], 0, 200, lambda x, k=key: s.__setitem__(k, x))
+        row.layout().setContentsMargins(0, 12, 0, 0)     # air below the device lists
+        grid.addWidget(row, 2, col)
     grid.setColumnStretch(0, 1)
     grid.setColumnStretch(1, 1)
     v.addLayout(grid)
 
     # mic test
     v.addWidget(section("Проверка микрофона", "Скажите что-нибудь — вы услышите себя. "
-                        "Полоса показывает уровень, белая метка — порог срабатывания."))
+                        "Полоса показывает уровень, метка на ней — порог срабатывания."))
     meter = LevelMeter()
     meter.editable = not s["vad_auto"] and s["input_mode"] == "vad"
     test = button("Проверить", None)
     row = QHBoxLayout()
+    row.setSpacing(14)
     row.addWidget(test)
     row.addWidget(meter, 1)
     v.addLayout(row)
@@ -253,7 +256,7 @@ def page_voice(view, v):
     vb.setContentsMargins(0, 0, 0, 0)
     vb.addWidget(switch_row("Определять чувствительность автоматически",
                             "Порог подстраивается под фоновый шум. Выключите, чтобы задать его вручную "
-                            "перетаскиванием белой метки на полосе выше.", s["vad_auto"],
+                            "перетаскиванием метки на полосе выше.", s["vad_auto"],
                             lambda on: (s.__setitem__("vad_auto", on), s.save(),
                                         setattr(meter, "editable", not on))))
     v.addWidget(vad_box)
@@ -282,9 +285,20 @@ def page_voice(view, v):
     v.addWidget(switch_row("Эхоподавление", "Убирает из микрофона звук ваших колонок — можно говорить "
                            "без наушников.", s["aec"], proc("aec")))
     v.addWidget(switch_row("Шумоподавление", "Гасит шум вентилятора, клавиатуры и улицы.", s["ns"], proc("ns")))
-    level_row = QHBoxLayout()
-    level_row.addWidget(label("Сила шумоподавления", "muted"))
+    level_row = QFrame()
+    level_row.setObjectName("SettingRow")
+    level_row.setStyleSheet(f"#SettingRow {{ border-bottom: 1px solid {T.c['divider']}; }}")
+    lr = QHBoxLayout(level_row)
+    lr.setContentsMargins(0, 10, 0, 12)
+    lr_col = QVBoxLayout()
+    lr_col.setSpacing(2)
+    lr_title = QLabel("Сила шумоподавления")
+    lr_title.setStyleSheet(f"color: {T.c['header']}; font-weight: 600;")
+    lr_col.addWidget(lr_title)
+    lr_col.addWidget(label("Сильнее — чище фон, но голос может звучать глуше.", "hint", wrap=True))
+    lr.addLayout(lr_col, 1)
     level = QComboBox()
+    level.setMinimumWidth(190)
     for i, name in enumerate(("Слабое", "Среднее", "Сильное", "Очень сильное")):
         level.addItem(name, i)
     level.setCurrentIndex(int(s["ns_level"]))
@@ -294,9 +308,8 @@ def page_voice(view, v):
         s.save()
         core.voice.rebuild_processing()
     level.currentIndexChanged.connect(level_changed)
-    level_row.addWidget(level)
-    level_row.addStretch(1)
-    v.addLayout(level_row)
+    lr.addWidget(level, 0, Qt.AlignVCenter)
+    v.addWidget(level_row)
     v.addWidget(switch_row("Автоматическая громкость", "Выравнивает громкость: тихий голос подтягивает, "
                            "крик приглушает.", s["agc"], proc("agc")))
 
@@ -305,6 +318,7 @@ def page_voice(view, v):
 def page_stream(view, v):
     s = view.s
     v.addWidget(label("Демонстрация экрана", "h2"))
+    v.addSpacing(6)
     v.addWidget(label("Запускается кнопкой «Демонстрация экрана» в голосовом канале. Зрители открывают "
                       "трансляцию в отдельном окне — двойной клик или клавиша F разворачивает его на весь "
                       "экран.", "muted", wrap=True))
@@ -352,6 +366,7 @@ def page_network(view, v):
     s, core, win = view.s, view.core, view.win
     c = T.c
     v.addWidget(label("Сеть", "h2"))
+    v.addSpacing(6)
     v.addWidget(label("Серверов нет: друзья соединяются напрямую — в локальной сети, через Radmin VPN или "
                       "через интернет. Всё зашифровано и подписано. Если напрямую пробиться не удаётся, "
                       "трафик идёт через ретранслятор n0 — он видит только зашифрованные данные.",
@@ -363,6 +378,7 @@ def page_network(view, v):
                       if closed else "открытая: в неё попадает каждый в вашей сети, кто введёт то же "
                       "название, а через интернет — по приглашению."), None, wrap=True))
     row = QHBoxLayout()
+    row.setSpacing(8)
     row.addWidget(button("Пригласить друга", None, lambda: InviteDialog(win, core).exec()))
     row.addWidget(button("Присоединиться по коду", "secondary", lambda: JoinDialog(win, core).exec()))
 
@@ -383,6 +399,7 @@ def page_network(view, v):
     room = QLineEdit(s["room"])
     room.setMaxLength(32)
     rrow = QHBoxLayout()
+    rrow.setSpacing(8)
     rrow.addWidget(room, 1)
 
     def apply_room():
@@ -452,6 +469,7 @@ def page_network(view, v):
     v.addWidget(section("Ваш ID", "Публичный ключ: по нему вас находят и по нему проверяют подпись "
                         "ваших сообщений."))
     idrow = QHBoxLayout()
+    idrow.setSpacing(6)
     ident = QLabel(s.uid[:16] + "…" + s.uid[-8:])
     ident.setStyleSheet(f"color: {c['header']}; font-family: Consolas; font-size: {T.px(11)}pt;")
     copy = IconButton("copy", "Скопировать полностью", 18, 30)
@@ -483,16 +501,18 @@ def page_updates(view, v):
     s, win = view.s, view.win
     c = T.c
     v.addWidget(label("Обновления", "h2"))
+    v.addSpacing(6)
     v.addWidget(label(f"Установлена версия {VERSION}. Новые версии выходят как релизы на GitHub — "
-                      f"с описанием изменений и готовым архивом.", "muted", wrap=True))
+                      f"с описанием изменений и установщиком.", "muted", wrap=True))
     v.addWidget(switch_row("Проверять при запуске", "Тихо проверять, не вышел ли новый релиз, и показывать "
                            "полоску сверху, если вышел.", s["check_updates"],
                            lambda on: (s.__setitem__("check_updates", on), s.save())))
     row = QHBoxLayout()
+    row.setSpacing(8)
     check = button("Проверить сейчас", "secondary")
     apply_btn = button("Обновить", "success")
     apply_btn.hide()
-    releases = button("Все релизы", "link",
+    releases = button("Все релизы на GitHub", "url",
                       lambda: __import__("webbrowser").open(updater.RELEASES_PAGE))
     row.addWidget(check)
     row.addWidget(apply_btn)
@@ -526,7 +546,7 @@ def page_updates(view, v):
     notes.setOpenExternalLinks(True)
     notes.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.LinksAccessibleByMouse)
     cl.addWidget(notes)
-    open_page = button("Открыть релиз на GitHub", "link",
+    open_page = button("Открыть релиз на GitHub", "url",
                        lambda: __import__("webbrowser").open(last.get("url", updater.RELEASES_PAGE)))
     cl.addWidget(open_page, 0, Qt.AlignLeft)
     card.hide()

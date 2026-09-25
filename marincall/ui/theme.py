@@ -2,6 +2,8 @@
 
 import ctypes
 import sys
+import tempfile
+from pathlib import Path
 
 from PySide6.QtGui import QColor, QFont
 from PySide6.QtWidgets import QApplication
@@ -87,7 +89,8 @@ class Theme:
         accent = settings["accent"]
         c.update(accent=accent, accent_hover=shade(accent, 0.85),
                  accent_soft=mix(c["main"], accent, 0.18),
-                 green=GREEN, red=RED, yellow=YELLOW, white="#ffffff")
+                 green=GREEN, red=RED, yellow=YELLOW, white="#ffffff",
+                 link="#006ce7" if self.name == "light" else "#00a8fc")
         self.c = c
         self.scale = max(0.8, min(1.4, settings["font_scale"] / 100))
 
@@ -115,11 +118,27 @@ def apply(app: QApplication, settings):
     f.setPointSizeF(10 * T.scale)
     f.setHintingPreference(QFont.PreferNoHinting)
     app.setFont(f)
-    app.setStyleSheet(stylesheet())
+    app.setStyleSheet(stylesheet(_arrow_file(T.c["icon"])))
 
 
-def stylesheet():
+def _arrow_file(color):
+    """Style sheets take images only from files: the combo box chevron in the theme colour."""
+    from . import icons
+    folder = Path(tempfile.gettempdir()) / "MarinCall"
+    path = folder / f"chevron-{color.lstrip('#')}.png"
+    try:
+        if not path.exists():
+            folder.mkdir(parents=True, exist_ok=True)
+            icons.pixmap("chevron_down", color, 32, 2.4).save(str(path))
+    except OSError:
+        return ""
+    return path.as_posix()
+
+
+def stylesheet(arrow=""):
     c = T.c
+    arrow_rule = (f'QComboBox::down-arrow {{ image: url("{arrow}"); width: 14px; height: 14px; }}'
+                  if arrow else "")
     return f"""
     * {{ outline: none; }}
     QWidget {{ color: {c['text']}; background: transparent; }}
@@ -156,9 +175,11 @@ def stylesheet():
     #ComposerBox {{ background: {c['input']}; border-radius: 8px; }}
 
     QComboBox {{ background: {c['input']}; border: none; border-radius: 6px; padding: 8px 12px;
-                 color: {c['text']}; min-height: 20px; }}
+                 padding-right: 34px; color: {c['text']}; min-height: 20px; }}
     QComboBox:hover {{ background: {c['active']}; }}
-    QComboBox::drop-down {{ border: none; width: 26px; }}
+    QComboBox::drop-down {{ subcontrol-origin: padding; subcontrol-position: center right;
+                            border: none; width: 34px; }}
+    {arrow_rule}
     QComboBox QAbstractItemView {{ background: {c['float']}; color: {c['text']}; border: none;
         padding: 4px; selection-background-color: {c['accent']}; selection-color: white;
         outline: none; }}
@@ -176,6 +197,9 @@ def stylesheet():
     QPushButton[kind="link"] {{ background: transparent; color: {c['text']}; font-weight: 500;
                                 padding: 6px 8px; }}
     QPushButton[kind="link"]:hover {{ text-decoration: underline; }}
+    QPushButton[kind="url"] {{ background: transparent; color: {c['link']}; font-weight: 500;
+                               padding: 6px 4px; }}
+    QPushButton[kind="url"]:hover {{ text-decoration: underline; }}
 
     QMenu {{ background: {c['float']}; border: none; border-radius: 6px; padding: 6px; }}
     QMenu::item {{ padding: 7px 26px 7px 10px; border-radius: 3px; color: {c['text']}; }}
@@ -183,10 +207,11 @@ def stylesheet():
     QMenu::item[danger="true"] {{ color: {c['red']}; }}
     QMenu::separator {{ height: 1px; background: {c['divider']}; margin: 4px 6px; }}
 
+    QSlider:horizontal {{ min-height: 26px; }}
     QSlider::groove:horizontal {{ height: 8px; background: {c['active']}; border-radius: 4px; }}
     QSlider::sub-page:horizontal {{ background: {c['accent']}; border-radius: 4px; }}
-    QSlider::handle:horizontal {{ background: white; width: 12px; height: 22px; margin: -7px 0;
-                                  border-radius: 3px; }}
+    QSlider::handle:horizontal {{ background: white; width: 10px; height: 24px; margin: -8px 0;
+                                  border-radius: 4px; border: 1px solid {c['divider']}; }}
 
     QCheckBox {{ spacing: 8px; }}
     QRadioButton {{ spacing: 10px; padding: 4px 0; }}
