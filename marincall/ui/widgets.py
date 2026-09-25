@@ -2,7 +2,7 @@
 
 from PySide6.QtCore import (Property, QEasingCurve, QPoint, QPropertyAnimation, QRect, QRectF,
                             QSize, Qt, QTimer, Signal)
-from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath
+from PySide6.QtGui import QBrush, QColor, QFont, QImageReader, QPainter, QPainterPath, QPixmap, QTransform
 from PySide6.QtWidgets import (QAbstractButton, QFrame, QGraphicsOpacityEffect, QHBoxLayout,
                                QLabel, QLayout, QPushButton, QSizePolicy, QToolButton, QWidget)
 
@@ -57,12 +57,55 @@ def human_size(n):
         n /= 1024
 
 
-class Avatar(QWidget):
-    """Coloured circle with an initial, optional speaking ring and presence dot."""
+_pictures = {}                  # (path, pixels) -> QPixmap, square and scaled
+_KEEP = object()
 
-    def __init__(self, name="", color="#5865f2", size=32, parent=None):
+
+def avatar_pixmap(path, px):
+    """A profile picture cropped to a square — decoded at most once per size."""
+    key = (path, px)
+    pm = _pictures.get(key)
+    if pm is None:
+        pm = QPixmap()
+        reader = QImageReader(path)
+        size = reader.size()
+        if size.isValid() and size.width() <= 8192 and size.height() <= 8192:   # a hostile file can't eat RAM
+            img = reader.read()
+            if not img.isNull():
+                side = min(img.width(), img.height())
+                img = img.copy((img.width() - side) // 2, (img.height() - side) // 2, side, side)
+                pm = QPixmap.fromImage(img.scaled(px, px, Qt.IgnoreAspectRatio, Qt.SmoothTransformation))
+        _pictures[key] = pm
+    return pm
+
+
+def prepare_avatar(path, px=256):
+    """Any picture → a small square file to share as a profile picture (None if unreadable)."""
+    import tempfile
+    from pathlib import Path
+    reader = QImageReader(str(path))
+    reader.setAutoTransform(True)                   # phone photos: honour the EXIF rotation
+    size = reader.size()
+    if not size.isValid() or size.width() > 12000 or size.height() > 12000:
+        return None
+    img = reader.read()
+    if img.isNull():
+        return None
+    side = min(img.width(), img.height())
+    img = img.copy((img.width() - side) // 2, (img.height() - side) // 2, side, side)
+    img = img.scaled(px, px, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+    fmt = "png" if img.hasAlphaChannel() else "jpg"
+    out = Path(tempfile.gettempdir()) / f"marincall-avatar.{fmt}"
+    return out if img.save(str(out), fmt.upper(), 90) else None
+
+
+class Avatar(QWidget):
+    """Picture (or coloured circle with an initial), optional speaking ring and presence dot."""
+
+    def __init__(self, name="", color="#5865f2", size=32, parent=None, image=None):
         super().__init__(parent)
         self._name, self._color, self._size = name, color, size
+        self._image = image
         self.speaking = False
         self.status = None      # None | "online" | "offline"
         pad = 3 if size < 60 else 5
@@ -70,11 +113,17 @@ class Avatar(QWidget):
         self._pad = pad
         self.setAttribute(Qt.WA_TransparentForMouseEvents)
 
-    def set(self, name=None, color=None):
+    @classmethod
+    def of(cls, member, size):
+        return cls(member["name"], member["color"], size, image=member.get("avatar"))
+
+    def set(self, name=None, color=None, image=_KEEP):
         if name is not None:
             self._name = name
         if color is not None:
             self._color = color
+        if image is not _KEEP:
+            self._image = image
         self.update()
 
     def set_speaking(self, on):
@@ -112,14 +161,23 @@ class Avatar(QWidget):
         body.addEllipse(rect)
         if hole:
             body = body.subtracted(hole)
-        p.setBrush(QColor(self._color))
-        p.drawPath(body)
-        f = QFont(p.font())
-        f.setPixelSize(max(9, int(s * 0.42)))
-        f.setWeight(QFont.DemiBold)
-        p.setFont(f)
-        p.setPen(QColor("#ffffff"))
-        p.drawText(rect, Qt.AlignCenter, (self._name[:1] or "?").upper())
+        dpr = self.devicePixelRatioF()
+        picture = avatar_pixmap(self._image, round(s * dpr)) if self._image else None
+        if picture is not None and not picture.isNull():
+            brush = QBrush(picture)
+            k = 1 / dpr                        # the picture is in device pixels
+            brush.setTransform(QTransform(k, 0, 0, k, pad, pad))
+            p.setBrush(brush)
+            p.drawPath(body)
+        else:
+            p.setBrush(QColor(self._color))
+            p.drawPath(body)
+            f = QFont(p.font())
+            f.setPixelSize(max(9, int(s * 0.42)))
+            f.setWeight(QFont.DemiBold)
+            p.setFont(f)
+            p.setPen(QColor("#ffffff"))
+            p.drawText(rect, Qt.AlignCenter, (self._name[:1] or "?").upper())
         if dot:
             p.setPen(Qt.NoPen)
             mark = QPainterPath()

@@ -113,6 +113,8 @@ class MessageList(QScrollArea):
 
     def set_channel(self, cid, keep_scroll=False):
         old = self.verticalScrollBar().value()
+        if keep_scroll and cid == self.cid and self.at_bottom() and not self._loading:
+            keep_scroll = False                 # rebuilt while at the bottom: stay at the bottom
         self.cid = cid
         msgs = self.core.store.visible_messages(cid)
         if not keep_scroll:

@@ -5,7 +5,8 @@ Mic (WASAPI, 48 kHz mono, 20 ms blocks) → WebRTC audio processing (echo
 cancellation, noise suppression, gain control — the same code as in Chrome and
 Discord) → gate (voice activity or push-to-talk) → Opus → QUIC datagrams to
 every peer in the same voice channel. Incoming Opus → per-speaker jitter buffer → mixed into the output stream,
-which also plays the UI sound effects.
+which also plays the UI sound effects and the sound of a screen share we watch (so the echo
+canceller hears all of it and the mic does not send it back into the call).
 """
 
 import collections
@@ -34,6 +35,8 @@ HANGOVER = 15                    # frames the gate stays open after speech (300 
 PREROLL = 2                      # frames sent from before the gate opened
 JITTER_START = 2                 # frames buffered before a speaker starts playing
 JITTER_MAX = 8
+STREAM_START = 0.08              # s of screen-share sound buffered before it starts playing
+STREAM_MAX = 0.35                # s: more than this queued and the oldest is dropped (stay live)
 
 # ── devices ─────────────────────────────────────────────────────────
 def _wasapi():
@@ -142,6 +145,10 @@ class VoiceEngine(QObject):
         self._last_rx = {}
         self._fx = []                # [array, position]
         self._lock = threading.Lock()
+        self._sbuf = collections.deque()     # screen-share sound: float32 (n, 2) chunks
+        self._sbuf_len = 0
+        self._sbuf_playing = False
+        self._slock = threading.Lock()
 
     # ── lifecycle ───────────────────────────────────────────────────
     def start(self):
@@ -246,6 +253,44 @@ class VoiceEngine(QObject):
     def play(self, name):
         if self.s["sounds"] and name in EFFECTS:
             self._fx.append([EFFECTS[name], 0])
+
+    # ── the sound of a screen share we watch ────────────────────────
+    def push_stream_audio(self, chunk):
+        """48 kHz stereo float32 from the stream decoder (its own thread)."""
+        with self._slock:
+            self._sbuf.append(np.ascontiguousarray(chunk, np.float32))
+            self._sbuf_len += len(chunk)
+            while self._sbuf_len > SR * STREAM_MAX and len(self._sbuf) > 1:
+                self._sbuf_len -= len(self._sbuf.popleft())
+
+    def clear_stream_audio(self):
+        with self._slock:
+            self._sbuf.clear()
+            self._sbuf_len = 0
+            self._sbuf_playing = False
+
+    def _pull_stream(self, frames):
+        with self._slock:
+            if not self._sbuf_playing:
+                if self._sbuf_len < SR * STREAM_START:
+                    return None
+                self._sbuf_playing = True
+            if self._sbuf_len < frames:            # ran dry: buffer a little again
+                self._sbuf_playing = False
+                return None
+            out = np.empty((frames, 2), np.float32)
+            pos = 0
+            while pos < frames:
+                chunk = self._sbuf[0]
+                take = min(len(chunk), frames - pos)
+                out[pos:pos + take] = chunk[:take]
+                if take == len(chunk):
+                    self._sbuf.popleft()
+                else:
+                    self._sbuf[0] = chunk[take:]
+                pos += take
+            self._sbuf_len -= frames
+            return out
 
     # ── encoding ────────────────────────────────────────────────────
     @staticmethod
@@ -367,6 +412,11 @@ class VoiceEngine(QObject):
                     buf.popleft()
                 self._playing[uid] = playing
             mix *= self.s["output_volume"] / 100.0
+        share = self._pull_stream(frames)
+        if share is not None and not self.s["deafened"]:
+            share *= self.s["output_volume"] / 100.0 * self.s.get("stream_volume", 100) / 100.0
+        else:
+            share = None
         for fx in list(self._fx):
             arr, pos = fx
             piece = arr[pos:pos + frames]
@@ -376,11 +426,14 @@ class VoiceEngine(QObject):
                 self._fx.remove(fx)
         if self.in_stream is not None and self._apm is not None:
             # echo reference: everything the speakers play except our own mic-test loopback
-            self._far.append((np.clip(mix, -1.0, 1.0) * 32767).astype(np.int16))
+            far = mix if share is None else mix + share.mean(axis=1)
+            self._far.append((np.clip(far, -1.0, 1.0) * 32767).astype(np.int16))
         if self.monitor and self._monitor_buf:
             chunk = self._monitor_buf.popleft()
             if len(chunk) == frames:
                 mix += chunk
-        np.clip(mix, -1.0, 1.0, out=mix)
         outdata[:, 0] = mix
         outdata[:, 1] = mix
+        if share is not None:
+            outdata += share
+        np.clip(outdata, -1.0, 1.0, out=outdata)

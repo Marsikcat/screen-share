@@ -1,0 +1,41 @@
+# Push a tag vX.Y.Z (matching VERSION) and this builds the installer on GitHub's machine
+# and creates the release. With the MARINCALL_SIGNING_KEY secret it is published signed;
+# without it, it stays a draft until `python tools\release.py --sign-draft vX.Y.Z` on the
+# PC that holds the key (the safer setup: the key never leaves that PC).
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Dependencies
+        run: python -m pip install -r requirements.txt pyinstaller pytest
+      - name: Tests
+        run: python -m pytest -q
+      - name: Inno Setup
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) {
+            choco install innosetup -y --no-progress
+          }
+      - name: Build
+        run: python tools/build.py
+      - name: Release
+        run: python tools/release.py --ci
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MARINCALL_SIGNING_KEY: ${{ secrets.MARINCALL_SIGNING_KEY }}

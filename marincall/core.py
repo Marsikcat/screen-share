@@ -55,6 +55,7 @@ class Core(QObject):
         self.downloads = {}         # file id -> {path, size, got}
         self.stream_info = ""
         self._last_typing = 0.0
+        self._avatar_files = {}     # file id -> path (None: not here yet)
 
         self.mesh = Mesh(settings, self._hello_payload)
         self.mesh.peer_up.connect(self._on_peer_up)
@@ -69,7 +70,8 @@ class Core(QObject):
         self.sender = StreamSender(self.mesh)
         self.preview = SourcePreview()      # what the streamer sees of their own stream
         self.sender.stopped.connect(self._on_stream_stopped)
-        self.viewer = StreamViewer(self.mesh)
+        self.sender.warning.connect(lambda m: self.toast.emit(m, "error"))
+        self.viewer = StreamViewer(self.mesh, self.voice)
         self.viewer.closed.connect(self._on_viewer_closed)
 
         self._timer = QTimer(self, interval=1000, timeout=self._tick)
@@ -84,6 +86,8 @@ class Core(QObject):
                 self.store.profiles[self.me]["name"] != self.s["name"]:
             if self.s["name"]:
                 self._publish("profile", name=self.s["name"], color=self.s["color"])
+        if (self.s.get("avatar") or "") != self.store.avatar_of(self.me):
+            self._publish("avatar", file=self.s.get("avatar") or "")
 
     def shutdown(self):
         self.preview.stop()
@@ -128,7 +132,35 @@ class Core(QObject):
             color = (prof or {}).get("color") or hello.get("color") or "#5865f2"
         state = self._my_state() if uid == self.me else self.states.get(uid, {})
         return {"uid": uid, "name": name, "color": color, "online": uid in self.online(),
-                "state": state}
+                "state": state, "avatar": self.avatar_path(uid)}
+
+    def avatar_path(self, uid):
+        """The picture someone chose, if we have it (it is fetched from peers like any file)."""
+        mine = uid in (self.me, self.s.get("legacy_uid"))
+        fid = (self.s.get("avatar") or "") if mine else self.store.avatar_of(uid)
+        if not fid:
+            return None
+        if fid not in self._avatar_files:
+            path = self.file_path(fid)
+            self._avatar_files[fid] = str(path) if path else None
+            if not path:
+                self.request_file(fid)
+        return self._avatar_files[fid]
+
+    def set_avatar(self, path):
+        """path: a prepared square picture, or None to go back to the letter."""
+        fid = ""
+        if path:
+            meta = self.import_file(path)
+            if not meta:
+                return False
+            fid = meta["id"]
+            self._avatar_files.pop(fid, None)
+        self.s["avatar"] = fid
+        self.s.save()
+        self._publish("avatar", file=fid)
+        self.members_changed.emit()
+        return True
 
     def members(self):
         # 2.x archive authors (short ids) show up in old messages, not in the member list
@@ -330,6 +362,10 @@ class Core(QObject):
             self.members_changed.emit()
         elif k == "room":
             self.room_changed.emit()
+        elif k == "avatar":
+            if ev["file"] and not self.file_path(ev["file"]):
+                self.request_file(ev["file"], prefer=ev["a"])
+            self.members_changed.emit()
 
     def mentions_me(self, text):
         name = re.escape(self.s["name"])
@@ -523,10 +559,8 @@ class Core(QObject):
     def watch(self, uid):
         if self.viewer.uid:
             self.unwatch()
-        if self.viewer.watch(uid, f"Трансляция — {self.name_of(uid)}"):
-            self.mesh.send(uid, {"t": "watch", "on": True})
-        else:
-            self.toast.emit("Не найден ffplay — запустите setup.bat", "error")
+        self.viewer.watch(uid)
+        self.mesh.send(uid, {"t": "watch", "on": True})
         self.stream_changed.emit()
 
     def unwatch(self):
@@ -537,8 +571,13 @@ class Core(QObject):
             self.stream_changed.emit()
 
     def _on_viewer_closed(self, uid):
-        self.mesh.send(uid, {"t": "watch", "on": False})
-        self.stream_changed.emit()
+        """The stream stopped by itself (it could not be decoded, or the data ended)."""
+        if self.viewer.uid == uid:
+            self.viewer.stop()
+            self.mesh.send(uid, {"t": "watch", "on": False})
+            if self.states.get(uid, {}).get("streaming"):
+                self.toast.emit(f"Не удалось показать трансляцию {self.name_of(uid)}", "error")
+            self.stream_changed.emit()
 
     # ── files ───────────────────────────────────────────────────────
     @staticmethod
@@ -621,6 +660,9 @@ class Core(QObject):
                 dl["path"].replace(FILES_DIR / fid)
                 self.wanted.pop(fid, None)
                 self.file_ready.emit(fid)
+                if fid in self._avatar_files:          # someone's picture arrived
+                    self._avatar_files.pop(fid)
+                    self.members_changed.emit()
             else:
                 dl["path"].unlink(missing_ok=True)
                 self.request_file(fid)

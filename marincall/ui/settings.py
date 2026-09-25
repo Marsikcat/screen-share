@@ -2,14 +2,14 @@
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor, QPainter, QPen
-from PySide6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QLineEdit, QScrollArea, QSizePolicy,
-                               QSlider, QToolButton, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit, QScrollArea,
+                               QSizePolicy, QSlider, QToolButton, QVBoxLayout, QWidget)
 
 from .. import system
 from ..config import APP_NAME, PALETTE, REPO, VERSION
 from . import icons
 from .theme import ACCENTS, THEMES, T
-from .widgets import Avatar, IconButton, Switch, button, label
+from .widgets import Avatar, IconButton, Switch, button, label, prepare_avatar
 
 NAV = [
     ("НАСТРОЙКИ ПОЛЬЗОВАТЕЛЯ", None),
@@ -237,19 +237,48 @@ class SettingsView(QWidget):
         c.addWidget(banner)
         row = QHBoxLayout()
         row.setContentsMargins(16, 12, 16, 0)
-        self.p_avatar = Avatar(self.s["name"], self.s["color"], 72)
+        self.p_avatar = Avatar.of(self.core.member(self.core.me), 72)
         row.addWidget(self.p_avatar)
         name = QLabel(self.s["name"] or "Без имени")
         name.setStyleSheet(f"color: {T.c['header']}; font-size: {T.px(15)}pt; font-weight: 700;")
         row.addWidget(name, 1, Qt.AlignBottom)
+        pic_row = QHBoxLayout()
+        pic_row.setSpacing(6)
+        change = button("Сменить аватар", "secondary")
+        drop = button("Убрать", "link")
+        drop.setVisible(bool(self.s.get("avatar")))
+        pic_row.addWidget(change)
+        pic_row.addWidget(drop)
+        row.addLayout(pic_row)
+        row.setAlignment(pic_row, Qt.AlignBottom)
         c.addLayout(row)
+
+        def choose_picture():
+            path, _ = QFileDialog.getOpenFileName(self, "Картинка для аватара", "",
+                                                  "Картинки (*.png *.jpg *.jpeg *.webp *.gif *.bmp)")
+            if not path:
+                return
+            ready = prepare_avatar(path)
+            if not ready or not self.core.set_avatar(ready):
+                self.win.toast("Не получилось открыть эту картинку", "error")
+                return
+            self.p_avatar.set(image=self.core.avatar_path(self.core.me))
+            drop.show()
+            self.win.toast("Аватар обновлён — друзья увидят его, как только будут в сети")
+
+        def drop_picture():
+            self.core.set_avatar(None)
+            self.p_avatar.set(image=None)
+            drop.hide()
+        change.clicked.connect(choose_picture)
+        drop.clicked.connect(drop_picture)
         v.addSpacing(16)
         v.addWidget(card)
         v.addWidget(section("Отображаемое имя", "Так вас видят остальные в чате и голосовых каналах."))
         edit = QLineEdit(self.s["name"])
         edit.setMaxLength(32)
         v.addWidget(edit)
-        v.addWidget(section("Цвет аватара"))
+        v.addWidget(section("Цвет аватара", "Фон буквы, если картинки нет, и цвет вашего имени в чате."))
         colors = QHBoxLayout()
         colors.setSpacing(6)
         self._color = self.s["color"]

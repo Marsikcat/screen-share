@@ -17,6 +17,8 @@ BUNDLE = Path(getattr(sys, "_MEIPASS", ROOT))
 VERSION = (BUNDLE / "VERSION").read_text(encoding="utf-8").strip()
 REPO = "Marsikcat/screen-share"
 BRANCH = "master"
+# Updates are installed only when signed with this key (see signing.py, tools/sign.py).
+RELEASE_KEY = "28068bf159615a88d564818b37ee9bb419ff9733db3e6c5281235d74b1bcf195"
 
 # A second instance on the same PC (for testing) gets its own ports and data.
 INSTANCE = int(os.environ.get("MOYDISCORD_INSTANCE", "0") or 0)
@@ -42,7 +44,6 @@ FFPLAY_BIN = FFMPEG_DIR / "ffplay.exe"
 # Ports. Only the first two need to be open in the firewall; the rest are loopback.
 DISCOVERY_PORT = 8890              # UDP  LAN announcements (shared by all instances)
 PEER_PORT = 8891 + _OFF            # UDP  iroh QUIC: chat sync, voice, screen share — everything
-STREAM_PORT = 8888 + _OFF          # UDP  loopback: incoming screen share -> ffplay
 STREAM_RELAY_PORT = 8895 + _OFF    # UDP  loopback: ffmpeg -> relay to viewers
 PROTOCOL = 3
 
@@ -55,6 +56,7 @@ PALETTE = ["#5865f2", "#3ba55c", "#faa61a", "#ed4245", "#eb459e",
 DEFAULTS = {
     "name": "",
     "color": None,
+    "avatar": "",               # file id of the profile picture, "" = the coloured letter
     "room": "общая",
     "room_secret": "",          # hex; empty = derived from the room name (open LAN room)
     "network_mode": "internet", # internet (relays + NAT traversal) | lan (direct only)
@@ -85,7 +87,8 @@ DEFAULTS = {
     # screen share
     "stream_quality": "1080p60",
     "stream_encoder": "auto",   # auto | nvenc | cpu
-    "stream_audio": "",         # dshow device name, "" = no audio
+    "stream_audio": "system",   # "system" = the PC minus MarinCall, a dshow device, "" = none
+    "stream_volume": 100,       # the sound of streams we watch, percent
     # notifications
     "sounds": True,
     "notify": True,

@@ -29,7 +29,7 @@ FILE_ID_RE = re.compile(r"^[0-9a-f]{32}$")
 # 3.0–3.2 cut them to 64 characters, which broke replies, reactions, edits, deletes and
 # messages in user-created channels.
 ID_LIMIT = 96
-KINDS = {"msg", "edit", "del", "react", "ch_new", "ch_ren", "ch_del", "profile", "room"}
+KINDS = {"msg", "edit", "del", "react", "ch_new", "ch_ren", "ch_del", "profile", "room", "avatar"}
 
 # Fixed ids so every peer has the same starter channels without coordination.
 DEFAULT_CHANNELS = [
@@ -113,6 +113,11 @@ def validate(ev, legacy=False, need_sig=True):
         out["color"] = clean(ev.get("color"), 7)
     elif k == "room":
         out["name"] = clean(ev.get("name"), 48)
+    elif k == "avatar":          # a picture from the shared files, "" = back to the letter
+        fid = str(ev.get("file") or "")
+        if fid and not FILE_ID_RE.match(fid):
+            return None
+        out["file"] = fid
     return out
 
 
@@ -132,6 +137,7 @@ class Store:
         self.deleted = set()
         self.reactions = {}         # msg id -> {emoji: {uid: (ts, event id, on)}}
         self.profiles = {}          # uid -> {name, color, _v}
+        self.avatars = {}           # uid -> (ts, event id, file id or "")
         self.room_name = (0, "", "")
         for i, (cid, kind, name, topic) in enumerate(DEFAULT_CHANNELS):
             self.channels[cid] = {"id": cid, "kind": kind, "name": name, "topic": topic,
@@ -244,6 +250,10 @@ class Store:
         elif k == "room":
             if v > self.room_name[:2]:
                 self.room_name = (*v, ev["name"])
+        elif k == "avatar":
+            cur = self.avatars.get(ev["a"])
+            if cur is None or v > cur[:2]:
+                self.avatars[ev["a"]] = (*v, ev["file"])
 
     # ── queries ─────────────────────────────────────────────────────
     @staticmethod
@@ -275,6 +285,9 @@ class Store:
             if on:
                 out[emoji] = on
         return out
+
+    def avatar_of(self, uid):
+        return (self.avatars.get(uid) or (0, "", ""))[2]
 
     def display_room_name(self, fallback):
         return self.room_name[2] or fallback

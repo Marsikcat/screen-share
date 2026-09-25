@@ -319,9 +319,8 @@ def page_stream(view, v):
     s = view.s
     v.addWidget(label("Демонстрация экрана", "h2"))
     v.addSpacing(6)
-    v.addWidget(label("Запускается кнопкой «Демонстрация экрана» в голосовом канале. Зрители открывают "
-                      "трансляцию в отдельном окне — двойной клик или клавиша F разворачивает его на весь "
-                      "экран.", "muted", wrap=True))
+    v.addWidget(label("Запускается кнопкой «Демонстрация экрана» в голосовом канале. Зрители смотрят "
+                      "её прямо в канале; двойной щелчок или клавиша F — на весь экран.", "muted", wrap=True))
     grid = QGridLayout()
     grid.setContentsMargins(0, 18, 0, 0)
     grid.setHorizontalSpacing(16)
@@ -340,9 +339,8 @@ def page_stream(view, v):
     enc.setCurrentIndex(max(0, enc.findData(s["stream_encoder"])))
     enc.currentIndexChanged.connect(lambda: (s.__setitem__("stream_encoder", enc.currentData()), s.save()))
     audio = QComboBox()
-    audio.addItem("Без звука", "")
-    for name in stream.list_audio_devices():
-        audio.addItem(name, name)
+    for text, value in stream.audio_choices():
+        audio.addItem(text, value)
     audio.setCurrentIndex(max(0, audio.findData(s["stream_audio"])))
     audio.currentIndexChanged.connect(lambda: (s.__setitem__("stream_audio", audio.currentData()), s.save()))
     grid.addWidget(label("КАЧЕСТВО ПО УМОЛЧАНИЮ", "caption"), 0, 0)
@@ -355,9 +353,10 @@ def page_stream(view, v):
     grid.setColumnStretch(1, 1)
     v.addLayout(grid)
     v.addSpacing(8)
-    v.addWidget(label("Чтобы друзья слышали звук игры или видео, выберите «Стерео микшер» "
-                      "(включается в Панели управления → Звук → Запись) или виртуальный кабель VB-Cable.",
-                      "hint", wrap=True))
+    v.addWidget(label("«Звук компьютера» — всё, что играет на этом ПК, кроме самого MarinCall: зрители слышат игру или видео, но не голоса из канала и не себя. Нужна Windows 10 2004 или новее.", "hint", wrap=True))
+    v.addSpacing(16)
+    v.addWidget(slider_row("Громкость трансляций, которые вы смотрите", s["stream_volume"], 0, 200,
+                           lambda x: s.__setitem__("stream_volume", x)))
 
 
 # ── network ─────────────────────────────────────────────────────────
@@ -503,7 +502,8 @@ def page_updates(view, v):
     v.addWidget(label("Обновления", "h2"))
     v.addSpacing(6)
     v.addWidget(label(f"Установлена версия {VERSION}. Новые версии выходят как релизы на GitHub — "
-                      f"с описанием изменений и установщиком.", "muted", wrap=True))
+                      f"с описанием изменений и установщиком. Ставится только установщик с подписью ключа "
+                      f"MarinCall — подменить обновление нельзя.", "muted", wrap=True))
     v.addWidget(switch_row("Проверять при запуске", "Тихо проверять, не вышел ли новый релиз, и показывать "
                            "полоску сверху, если вышел.", s["check_updates"],
                            lambda on: (s.__setitem__("check_updates", on), s.save())))

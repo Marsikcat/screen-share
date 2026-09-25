@@ -123,7 +123,7 @@ class MessageWidget(QFrame):
         g.setContentsMargins(0, 0, 0, 0)
         if first:
             member = core.member(msg["author"])
-            self.avatar = Avatar(member["name"], member["color"], 40)
+            self.avatar = Avatar.of(member, 40)
             g.addWidget(self.avatar, 0, Qt.AlignTop | Qt.AlignLeft)
         else:
             self.time_lb = QLabel(when(msg["ts"], full=False))

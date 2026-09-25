@@ -91,7 +91,7 @@ class VoiceMemberRow(QFrame):
         lay = QHBoxLayout(self)
         lay.setContentsMargins(34, 3, 8, 3)
         lay.setSpacing(6)
-        self.avatar = Avatar(m["name"], m["color"], 22)
+        self.avatar = Avatar.of(m, 22)
         self.avatar.set_speaking(self.core.is_speaking(uid) and not st.get("muted"))
         lay.addWidget(self.avatar)
         name = QLabel(elide(m["name"], 18))
@@ -423,7 +423,7 @@ class Sidebar(QWidget):
         h = QHBoxLayout(panel)
         h.setContentsMargins(8, 0, 8, 0)
         h.setSpacing(2)
-        self.me_avatar = Avatar(self.core.s["name"], self.core.s["color"], 32)
+        self.me_avatar = Avatar.of(self.core.member(self.core.me), 32)
         self.me_avatar.status = "online"
         h.addWidget(self.me_avatar)
         h.addSpacing(6)
@@ -453,7 +453,7 @@ class Sidebar(QWidget):
 
     def update_user(self):
         s = self.core.s
-        self.me_avatar.set(s["name"], s["color"])
+        self.me_avatar.set(s["name"], s["color"], self.core.avatar_path(self.core.me))
         self.me_name.setText(elide(s["name"] or "Без имени", 16))
         peers = self.core.mesh.peers()
         self.me_sub.setText(f"На связи: {len(peers)}" if peers else "Вы пока одни")

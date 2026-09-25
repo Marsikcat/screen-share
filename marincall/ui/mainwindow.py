@@ -83,6 +83,7 @@ class MainWindow(QMainWindow):
             (("Ctrl+Shift+U", "Ctrl+Shift+Г"), self._attach),
             (("Ctrl+,", "Ctrl+Б"), lambda: self.open_settings("profile")),
             (("Ctrl+/", "Ctrl+."), self.show_shortcuts),
+            (("F", "А"), self._stream_fullscreen),
         ):
             sc = QShortcut(self)
             sc.setKeys([QKeySequence(k) for k in keys])
@@ -239,6 +240,10 @@ class MainWindow(QMainWindow):
 
     def _chat_active(self):
         return self.stack.currentWidget() is self.root and self.views.currentWidget() is self.chat
+
+    def _stream_fullscreen(self):
+        if self.stack.currentWidget() is self.root and self.views.currentWidget() is self.voiceview:
+            self.voiceview.open_fullscreen()
 
     def _emoji(self):
         if self._chat_active():

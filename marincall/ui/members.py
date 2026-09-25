@@ -18,7 +18,7 @@ class MemberRow(QFrame):
         lay = QHBoxLayout(self)
         lay.setContentsMargins(8, 4, 8, 4)
         lay.setSpacing(10)
-        av = Avatar(m["name"], m["color"], 32)
+        av = Avatar.of(m, 32)
         av.status = "online" if m["online"] else "offline"
         lay.addWidget(av)
         col = QVBoxLayout()

@@ -4,6 +4,9 @@ Updates from GitHub Releases.
 Installed build: download MarinCall-Setup-X.exe from the release and run it silently —
 it replaces the app and starts it again. From source: download the source zip and copy
 it over the project folder.
+
+Either way the download must come with a valid `<file>.sig` from the release key
+(signing.py): an unsigned or tampered file is never installed.
 """
 
 import io
@@ -18,7 +21,8 @@ import urllib.request
 import zipfile
 from pathlib import Path
 
-from .config import FROZEN, REPO, ROOT, VERSION
+from . import signing
+from .config import FROZEN, RELEASE_KEY, REPO, ROOT, VERSION
 
 # never touched by an update
 SKIP = {".git", ".claude", "venv", "python", "ffmpeg", "__pycache__"}
@@ -54,7 +58,7 @@ def _result(tag, **extra):
     return {"current": VERSION, "latest": latest, "tag": tag,
             "available": parse_version(latest) > parse_version(VERSION),
             "title": f"MarinCall {latest}", "notes": "", "date": "", "size": 0,
-            "url": f"{RELEASES_PAGE}/tag/{tag}",
+            "url": f"{RELEASES_PAGE}/tag/{tag}", "asset": asset_name(latest),
             "download": f"{RELEASES_PAGE}/download/{tag}/{asset_name(latest)}", **extra}
 
 
@@ -66,15 +70,18 @@ def check():
         if e.code == 404:
             raise RuntimeError("в репозитории пока нет релизов") from None
         return _check_without_api()   # 403/429: API rate limit (60 requests/hour per IP)
-    asset = next((a for a in rel.get("assets") or [] if _wanted(a["name"])), None)
+    assets = rel.get("assets") or []
+    asset = next((a for a in assets if _wanted(a["name"])), None)
     extra = {"notes": rel.get("body") or "", "date": (rel.get("published_at") or "")[:10],
              "url": rel["html_url"]}
     if rel.get("name"):
         extra["title"] = rel["name"]
     if asset:
-        extra.update(download=asset["browser_download_url"], size=asset["size"])
+        extra.update(download=asset["browser_download_url"], size=asset["size"], asset=asset["name"])
+        sig = next((a for a in assets if a["name"] == asset["name"] + ".sig"), None)
+        extra["signature"] = sig["browser_download_url"] if sig else ""
     else:
-        extra["download"] = rel["zipball_url"]
+        extra.update(download="", signature="")
     return _result(rel["tag_name"], **extra)
 
 
@@ -96,13 +103,33 @@ def _find_root(folder):
     raise RuntimeError("архив не похож на MarinCall — обновление отменено")
 
 
+def _verified(info):
+    """The release file, downloaded and checked against the release key."""
+    name = info.get("asset") or asset_name(info["latest"])
+    if name != asset_name(info["latest"]):       # the signed name carries the version
+        raise RuntimeError("в релизе нет подходящего файла — скачайте обновление со страницы релизов")
+    sig_url = info.get("signature", info["download"] + ".sig")
+    if not info.get("download") or not sig_url:
+        raise RuntimeError("релиз не подписан — установите обновление вручную со страницы релизов")
+    try:
+        sig = _get(sig_url, timeout=30).decode("utf-8", errors="replace")
+    except urllib.error.HTTPError:
+        raise RuntimeError("релиз не подписан — установите обновление вручную со страницы релизов") from None
+    data = _get(info["download"], timeout=300)
+    if info.get("size") and len(data) != info["size"]:
+        raise RuntimeError("файл скачался не полностью — попробуйте ещё раз")
+    try:
+        signing.verify(RELEASE_KEY, name, data, sig)
+    except ValueError as e:
+        raise RuntimeError(f"подпись обновления не сходится ({e}) — установка отменена") from None
+    return data
+
+
 def apply(info=None):
     """Download the release archive and copy it over the app folder. Returns the new version."""
     global _installer
     info = info or check()
-    data = _get(info["download"], timeout=300)
-    if info.get("size") and len(data) != info["size"]:
-        raise RuntimeError("файл скачался не полностью — попробуйте ещё раз")
+    data = _verified(info)
     if FROZEN:
         if not info["download"].lower().endswith(".exe"):
             raise RuntimeError("в релизе нет установщика — скачайте его со страницы релизов")
