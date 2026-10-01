@@ -113,3 +113,31 @@ def test_avatar_events(tmp_path):
 def test_malformed_events(ev):
     uid = "a" * 64
     assert validate({"id": f"{uid}:1", "a": uid, "s": 1, "ts": 1, **ev}, need_sig=False) is None
+
+
+def test_pins(tmp_path):
+    a, _ = make_store(tmp_path / "a")
+    b, _ = make_store(tmp_path / "b")
+    m1 = a.create("msg", ch="d:text:general", text="правила", reply=None, files=[])
+    m2 = a.create("msg", ch="d:text:general", text="ссылка", reply=None, files=[])
+    b.add(m1), b.add(m2)
+    for ev in (b.create("pin", target=m1["id"], on=True), b.create("pin", target=m2["id"], on=True)):
+        a.add(ev)                                   # anyone in the room may pin
+    assert [m["text"] for m in a.pinned("d:text:general")] == ["ссылка", "правила"]   # newest pin first
+    a.add(b.create("pin", target=m2["id"], on=False))
+    assert [m["id"] for m in a.pinned("d:text:general")] == [m1["id"]]
+    a.create("del", target=m1["id"])
+    assert a.pinned("d:text:general") == [] and not a.is_pinned(m1["id"])
+
+
+def test_search(tmp_path):
+    st, _ = make_store(tmp_path)
+    st.create("msg", ch="d:text:general", text="Встречаемся в субботу у Бориса", reply=None, files=[])
+    gone = st.create("msg", ch="d:text:general", text="в субботу не смогу", reply=None, files=[])
+    st.create("msg", ch="d:text:media", text="", reply=None,
+              files=[{"id": "b" * 32, "name": "Суббота-фото.png", "size": 1, "type": "image/png"}])
+    st.create("del", target=gone["id"])
+    assert [m["text"] for m in st.search("СУББОТ бориса")] == ["Встречаемся в субботу у Бориса"]
+    assert {m["ch"] for m in st.search("суббот")} == {"d:text:general", "d:text:media"}   # files too
+    assert [m["ch"] for m in st.search("суббот", cid="d:text:media")] == ["d:text:media"]
+    assert st.search("   ") == []

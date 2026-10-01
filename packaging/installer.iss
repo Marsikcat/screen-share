@@ -51,6 +51,8 @@ Source: "..\dist\MarinCall\*"; DestDir: "{app}"; Flags: ignoreversion recursesub
 [InstallDelete]
 ; files of an older version that the new one no longer ships
 Type: filesandordirs; Name: "{app}\_internal"
+; FFmpeg is no longer shipped (screen share encodes through PyAV) — ~200 MB back
+Type: filesandordirs; Name: "{app}\ffmpeg"
 ; the app was called МойДискорд until 3.2 — drop its exe and its shortcuts
 Type: files; Name: "{app}\MoyDiscord.exe"
 Type: files; Name: "{autoprograms}\МойДискорд.lnk"

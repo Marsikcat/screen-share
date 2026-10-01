@@ -29,7 +29,10 @@ class ChannelItem(QFrame):
         lay = QHBoxLayout(self)
         lay.setContentsMargins(8, 0, 8, 0)
         lay.setSpacing(6)
-        self.icon = QLabel()
+        if self.kind == "dm":                       # a conversation: the person's picture
+            self.icon = Avatar.of(ch["member"], 22)
+        else:
+            self.icon = QLabel()
         self.name = QLabel(elide(ch["name"], 26))
         self.badge = QLabel()
         self.badge.setAlignment(Qt.AlignCenter)
@@ -58,8 +61,9 @@ class ChannelItem(QFrame):
         bg = c["active"] if self.selected else (c["hover"] if self._hover else "transparent")
         self.setStyleSheet(f"ChannelItem {{ background: {bg}; border-radius: 4px; }}")
         self.name.setStyleSheet(f"color: {fg}; font-weight: {600 if bright else 500};")
-        self.icon.setPixmap(icons.pixmap("hash" if self.kind == "text" else "volume",
-                                         c["muted"] if not self.selected else c["text"], 20))
+        if self.kind != "dm":
+            self.icon.setPixmap(icons.pixmap("hash" if self.kind == "text" else "volume",
+                                             c["muted"] if not self.selected else c["text"], 20))
         self.badge.setText(str(self.mentions))
         self.badge.setVisible(self.mentions > 0)
 
@@ -188,9 +192,10 @@ class Sidebar(QWidget):
         h.setContentsMargins(4, 14, 2, 4)
         cap = QLabel(title)
         cap.setProperty("role", "caption")
-        add = IconButton("plus", "Создать канал", 16, 22)
+        add = IconButton("plus", "Написать лично" if kind == "dm" else "Создать канал", 16, 22)
         add.hover_bg = "transparent"
-        add.clicked.connect(lambda: self.win.create_channel_dialog(kind))
+        add.clicked.connect(self.win.start_dm_dialog if kind == "dm"
+                            else lambda: self.win.create_channel_dialog(kind))
         h.addWidget(cap, 1)
         h.addWidget(add)
         return w
@@ -212,6 +217,10 @@ class Sidebar(QWidget):
                 row = VoiceMemberRow(self, uid)
                 self.voice_rows[uid] = row
                 self.list_lay.addWidget(row)
+        self.list_lay.addWidget(self._category("ЛИЧНЫЕ СООБЩЕНИЯ", "dm"))
+        for uid, cid in self.core.dm_list():
+            member = self.core.member(uid)
+            self._add_item({"id": cid, "kind": "dm", "name": member["name"], "member": member})
         self.list_lay.addStretch(1)
         self.update_unread()
         self.update_voice_panel()
@@ -225,7 +234,7 @@ class Sidebar(QWidget):
         self.list_lay.addWidget(item)
 
     def _clicked(self, cid):
-        ch = self.core.store.channel(cid)
+        ch = self.core.channel(cid)
         if ch and ch["kind"] == "voice" and self.core.my_voice != cid:
             self.core.join_voice(cid)
         self.channel_selected.emit(cid)
@@ -238,7 +247,7 @@ class Sidebar(QWidget):
 
     def update_unread(self):
         for cid, item in self.items.items():
-            if item.kind == "text":
+            if item.kind in ("text", "dm"):
                 n, mentions = self.core.unread(cid) if cid != self.selected or not self.win.isActiveWindow() \
                     else (0, 0)
                 item.set_state(unread=n > 0, mentions=mentions)
@@ -275,10 +284,14 @@ class Sidebar(QWidget):
         m.exec(self.header.mapToGlobal(QPoint(8, self.header.height())))
 
     def channel_menu(self, cid, pos):
-        ch = self.core.store.channel(cid)
+        ch = self.core.channel(cid)
         if not ch:
             return
         m = QMenu(self)
+        if ch["kind"] == "dm":
+            m.addAction("Отметить как прочитанное", lambda: (self.core.mark_read(cid), self.update_unread()))
+            m.exec(pos)
+            return
         if ch["kind"] == "text":
             m.addAction("Отметить как прочитанное", lambda: (self.core.mark_read(cid), self.update_unread()))
         else:
@@ -330,6 +343,8 @@ class Sidebar(QWidget):
                 lst.remove(uid) if uid in lst else lst.append(uid)
                 core.s.save()
             m.addAction("Включить звук" if muted else "Заглушить для себя", toggle_local)
+            m.addSeparator()
+            m.addAction(icons.icon("at", T.c["text"], 16), "Написать лично", lambda: self.win.open_dm(uid))
         else:
             m.addAction("Настройки голоса", lambda: self.open_settings.emit("voice"))
         m.exec(pos)

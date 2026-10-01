@@ -6,7 +6,7 @@ Build the Windows app and its installer.
     python tools\\build.py      (inside an environment with requirements.txt + pyinstaller)
 
 Result:
-    dist\\MarinCall\\                 MarinCall.exe, ScreenShare.exe, ffmpeg\\, _internal\\
+    dist\\MarinCall\\                 MarinCall.exe, ScreenShare.exe, _internal\\
     dist\\MarinCall-Setup-X.Y.Z.exe   installer (Inno Setup 6)
 """
 
@@ -58,21 +58,6 @@ def pyinstaller():
                    check=True, cwd=ROOT)
 
 
-def bundle_ffmpeg():
-    """Screen share needs ffmpeg.exe / ffplay.exe next to the app."""
-    src = ROOT / "ffmpeg"
-    if not (src / "ffmpeg.exe").exists() or not (src / "ffplay.exe").exists():
-        print("FFmpeg не найден в ffmpeg\\ — скачиваю…")
-        sys.path.insert(0, str(ROOT))
-        import screen_share
-        if not screen_share.download_ffmpeg():
-            sys.exit("Не удалось скачать FFmpeg")
-    dest = APP_DIR / "ffmpeg"
-    dest.mkdir(exist_ok=True)
-    for name in ("ffmpeg.exe", "ffplay.exe"):
-        shutil.copy2(src / name, dest / name)
-
-
 def find_iscc():
     for base in (os.environ.get("LOCALAPPDATA"), os.environ.get("ProgramFiles(x86)"),
                  os.environ.get("ProgramFiles")):
@@ -103,7 +88,6 @@ def main():
     print(f"MarinCall {ver}: сборка exe…")
     write_version_info(ver)
     pyinstaller()
-    bundle_ffmpeg()
     print("Установщик…")
     setup = installer(ver)
     print(f"\nГотово:\n  {APP_DIR}  ({size_mb(APP_DIR):.0f} МБ)\n  {setup}  ({size_mb(setup):.0f} МБ)")

@@ -52,20 +52,6 @@ def _run(app, sec, until=None):
     return False
 
 
-def _test_pattern(sender):
-    """Вика streams a test pattern and a tone instead of the real screen."""
-    def build(source, quality, encoder, audio):
-        from marincall.config import FFMPEG_BIN, STREAM_RELAY_PORT
-        return [str(FFMPEG_BIN), "-hide_banner", "-loglevel", "error",
-                "-re", "-f", "lavfi", "-i", "testsrc2=s=1280x720:r=30",
-                "-f", "lavfi", "-i", "sine=frequency=330:sample_rate=48000",
-                "-map", "0:v", "-map", "1:a", "-c:v", "libx264", "-preset", "superfast",
-                "-tune", "zerolatency", "-b:v", "2500k", "-g", "30", "-pix_fmt", "yuv420p",
-                "-c:a", "aac", "-b:a", "96k", "-ac", "2",
-                "-f", "mpegts", f"udp://127.0.0.1:{STREAM_RELAY_PORT}?pkt_size=1316"], False
-    sender.build_command = build
-
-
 def _avatar_picture():
     from PySide6.QtCore import QRectF, Qt
     from PySide6.QtGui import QColor, QImage, QLinearGradient, QPainter
@@ -91,11 +77,9 @@ def peer(role, secs):
     _env(instance)
     from PySide6.QtGui import QGuiApplication
     app = QGuiApplication([])
-    s = _settings(name, color, muted=role == "B", stream_volume=0, stream_audio="")
+    s = _settings(name, color, muted=role == "B", stream_volume=0, stream_audio="test")
     from marincall.core import Core
     c = Core(s)
-    if role == "C":
-        _test_pattern(c.sender)
     c.start()
     _run(app, 25, lambda: len(c.mesh.peers()) > 0)
     _run(app, 2)
@@ -113,12 +97,21 @@ def peer(role, secs):
             c.toggle_reaction(first["id"], "🔥")
         c.send_message("d:text:media", "Кину сюда скрины с вчерашней катки")
         c.send_message("d:text:media", "@Алиса глянь, тебе понравится")
+        hello = next((m for m in c.store.visible_messages(general) if "Всем привет" in c.store.text_of(m)), None)
+        if hello:
+            c.toggle_pin(hello["id"])
+        alice = next((u for u in c.mesh.peers() if c.name_of(u) == "Алиса"), None)
+        if alice:
+            dm = c.open_dm(alice)
+            c.send_message(dm, "Привет! Это личное сообщение — его видим только мы двое 🙂")
+            c.send_message(dm, "Во сколько сегодня собираемся?")
         c.join_voice("d:voice:general")
     else:
         c.send_message(general, "", files=[str(ROOT / "assets" / "icon.png")])
         c.join_voice("d:voice:general")
         _run(app, 1)
-        c.start_stream({"kind": "monitor", "label": "Тестовая таблица", "height": 720, "dxgi": None})
+        # a test pattern and a tone through the real encoder — the real screen is never captured
+        c.start_stream({"kind": "test", "label": "Тестовая таблица", "height": 720})
     t0 = time.time()
     stop = Path(os.environ.get("MARINCALL_SCREENS_STOP", "-"))
     while time.time() - t0 < secs and not stop.exists():
@@ -205,6 +198,18 @@ def tour(theme_name):
             shot(full, "09_stream_fullscreen")
             full.close()
 
+    def open_conversation():
+        boris = next((u for u in core.dms if core.name_of(u) == "Борис"), None)
+        if boris:
+            win.open_dm(boris)
+
+    def pins():
+        from marincall.ui.chat import PinsPopup
+        popup = PinsPopup(win.chat)          # a popup closes itself off-screen: picture it at once
+        popup.adjustSize()
+        popup.grab().save(str(OUT / f"{theme_name}_12_pins.png"))
+        popup.close()
+
     steps = [
         (16000, lambda: win.open_channel(general)),
         (1500, lambda: shot(win, "01_chat")),
@@ -216,6 +221,13 @@ def tour(theme_name):
         (600, lambda: shot(win, "05_voice_empty_channel")),
         (200, lambda: win.open_channel("d:text:media")),
         (900, lambda: shot(win, "06_chat_media")),
+        (200, open_conversation),
+        (900, lambda: shot(win, "07_direct_message")),
+        (200, lambda: win.open_channel(general)),
+        (300, lambda: (win.show_search(), win.search.input.setText("привет"))),
+        (900, lambda: shot(win, "11_search")),
+        (200, win.close_search),
+        (300, pins),
         (200, lambda: win.open_channel("d:voice:general")),
         (300, watch),
         (4000, lambda: shot(win, "08_watching_stream")),

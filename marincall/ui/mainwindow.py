@@ -15,6 +15,7 @@ from ..system import classic_command
 from . import dialogs, icons, theme
 from .chat import ChatView
 from .members import MemberList
+from .search import SearchPanel
 from .settings import SettingsView
 from .settings_pages import run_async
 from .sidebar import Sidebar
@@ -84,6 +85,7 @@ class MainWindow(QMainWindow):
             (("Ctrl+,", "Ctrl+Б"), lambda: self.open_settings("profile")),
             (("Ctrl+/", "Ctrl+."), self.show_shortcuts),
             (("F", "А"), self._stream_fullscreen),
+            (("Ctrl+F", "Ctrl+А"), self.show_search),
         ):
             sc = QShortcut(self)
             sc.setKeys([QKeySequence(k) for k in keys])
@@ -128,6 +130,7 @@ class MainWindow(QMainWindow):
         self.views = QStackedWidget()
         self.chat = ChatView(self.core)
         self.chat.members_toggled.connect(self._toggle_members)
+        self.chat.search_requested.connect(self.show_search)
         self.voiceview = VoiceView(self.core)
         self.voiceview.stream_requested.connect(self.pick_stream)
         self.views.addWidget(self.chat)
@@ -135,15 +138,21 @@ class MainWindow(QMainWindow):
         v.addWidget(self.views, 1)
         self.members = MemberList(self.core)
         self.members.setVisible(self.s.get("show_members", True))
+        self.members.dm_requested.connect(self.open_dm)
+        self.search = SearchPanel(self.core)
+        self.search.open_message.connect(self.reveal_message)
+        self.search.closed.connect(self.close_search)
+        self.search.hide()
         h.addWidget(self.sidebar)
         h.addWidget(center, 1)
         h.addWidget(self.members)
+        h.addWidget(self.search)
         self.root = root
         self.stack.addWidget(root)
         self.stack.setCurrentWidget(root)
         target = self.current or self.s["last_channel"]
         self.current = None
-        if not self.core.store.channel(target or ""):
+        if not self.core.channel(target or ""):
             texts = self.core.store.channel_list("text")
             target = texts[0]["id"] if texts else None
         if target:
@@ -157,11 +166,12 @@ class MainWindow(QMainWindow):
         self.build()
 
     def open_channel(self, cid):
-        ch = self.core.store.channel(cid)
+        ch = self.core.channel(cid)
         if not ch:
             return
         self.current = cid
-        if ch["kind"] == "text":
+        self.search.set_context(cid)
+        if ch["kind"] in ("text", "dm"):
             self.chat.set_channel(cid)
             self.views.setCurrentWidget(self.chat)
             self.s["last_channel"] = cid
@@ -173,10 +183,38 @@ class MainWindow(QMainWindow):
         self.close_settings()
 
     def _check_current(self):
-        if self.current and not self.core.store.channel(self.current):
+        if self.current and not self.core.channel(self.current):
             texts = self.core.store.channel_list("text")
             if texts:
                 self.open_channel(texts[0]["id"])
+
+    # ── direct messages & search ────────────────────────────────────
+    def open_dm(self, uid):
+        cid = self.core.open_dm(uid)
+        if cid:
+            self.open_channel(cid)
+
+    def start_dm_dialog(self):
+        uid = dialogs.pick_member(self, self.core)
+        if uid:
+            self.open_dm(uid)
+
+    def show_search(self):
+        if self.stack.currentWidget() is not self.root:
+            return
+        self.members.hide()
+        self.search.set_context(self.current)
+        self.search.show()
+        self.search.focus()
+
+    def close_search(self):
+        self.search.hide()
+        self.members.setVisible(self.s.get("show_members", True))
+
+    def reveal_message(self, cid, mid):
+        if cid != self.current:
+            self.open_channel(cid)
+        QTimer.singleShot(60, lambda: self.chat.list.reveal(mid))
 
     def _toggle_members(self):
         vis = not self.members.isVisible()
@@ -351,8 +389,8 @@ class MainWindow(QMainWindow):
         tray = getattr(self, "tray", None)
         if not tray:
             return
-        total = sum(self.core.unread(c["id"])[0] for c in self.core.store.channel_list("text")
-                    if c["id"] != self.current or not self.isActiveWindow())
+        cids = [c["id"] for c in self.core.store.channel_list("text")] + [c for _, c in self.core.dm_list()]
+        total = sum(self.core.unread(c)[0] for c in cids if c != self.current or not self.isActiveWindow())
         tray.setToolTip(f"{APP_NAME} — непрочитанных: {total}" if total else APP_NAME)
         tray.setIcon(app_icon(badge=total > 0))
 
@@ -406,8 +444,8 @@ class MainWindow(QMainWindow):
 
     def changeEvent(self, e):
         if e.type() == e.Type.ActivationChange and self.isActiveWindow() and self.current:
-            ch = self.core.store.channel(self.current)
-            if ch and ch["kind"] == "text":
+            ch = self.core.channel(self.current)
+            if ch and ch["kind"] in ("text", "dm"):
                 self.core.mark_read(self.current)
                 self.sidebar.update_unread()
         super().changeEvent(e)

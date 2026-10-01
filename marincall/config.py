@@ -37,14 +37,10 @@ if not DATA.exists() and _OLD_DATA.exists():
 FILES_DIR = DATA / "files"
 SETTINGS_FILE = DATA / "settings.json"
 
-FFMPEG_DIR = ROOT / "ffmpeg"
-FFMPEG_BIN = FFMPEG_DIR / "ffmpeg.exe"
-FFPLAY_BIN = FFMPEG_DIR / "ffplay.exe"
-
-# Ports. Only the first two need to be open in the firewall; the rest are loopback.
+# Ports — both need to be open in the firewall (the screen-share encoder talks to the app over
+# a loopback TCP port the system picks).
 DISCOVERY_PORT = 8890              # UDP  LAN announcements (shared by all instances)
 PEER_PORT = 8891 + _OFF            # UDP  iroh QUIC: chat sync, voice, screen share — everything
-STREAM_RELAY_PORT = 8895 + _OFF    # UDP  loopback: ffmpeg -> relay to viewers
 PROTOCOL = 3
 
 MAX_FILE = 25 * 1024 * 1024

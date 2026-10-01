@@ -45,8 +45,12 @@ class Core(QObject):
         self.me = settings.uid
         FILES_DIR.mkdir(parents=True, exist_ok=True)
         key = iroh.SecretKey.from_bytes(bytes.fromhex(settings["secret_key"]))
-        self.store = Store(settings.room_dir(), self.me, lambda data: key.sign(data).to_bytes(),
-                           self._verify)
+        self._sign = lambda data: key.sign(data).to_bytes()
+        self.store = Store(settings.room_dir(), self.me, self._sign, self._verify)
+        # direct messages: one small log per conversation, synced only between those two
+        self.dms = {}               # other uid -> Store
+        self.dm_peer = {}           # "dm:…" channel id -> other uid
+        self._load_dms()
         self.states = {}            # uid -> state dict from the peer
         self.my_voice = None
         self.typing = {}            # channel -> {uid: expiry}
@@ -56,6 +60,7 @@ class Core(QObject):
         self.stream_info = ""
         self._last_typing = 0.0
         self._avatar_files = {}     # file id -> path (None: not here yet)
+        self._private_files = {}    # file id -> the only peer to ask (direct messages)
 
         self.mesh = Mesh(settings, self._hello_payload)
         self.mesh.peer_up.connect(self._on_peer_up)
@@ -179,6 +184,91 @@ class Core(QObject):
     def room_name(self):
         return self.store.display_room_name(self.s["room"])
 
+    # ── direct messages ─────────────────────────────────────────────
+    def dm_cid(self, uid):
+        """The same id on both sides: both sign the very same channel name into their messages."""
+        pair = "".join(sorted((self.me, uid)))
+        return "dm:" + hashlib.sha256(pair.encode()).hexdigest()[:32]
+
+    def _dm_dir(self):
+        return self.s.room_dir() / "dm"
+
+    def _load_dms(self):
+        folder = self._dm_dir()
+        if folder.is_dir():
+            for sub in folder.iterdir():
+                if sub.is_dir() and UID_RE.match(sub.name):
+                    self.dm_store(sub.name)
+
+    def dm_store(self, uid, create=True):
+        st = self.dms.get(uid)
+        if st is None and create and UID_RE.match(uid) and uid != self.me:
+            path = self._dm_dir() / uid
+            path.mkdir(parents=True, exist_ok=True)
+            st = Store(path, self.me, self._sign, self._verify)
+            self.dms[uid] = st
+            self.dm_peer[self.dm_cid(uid)] = uid
+        return st
+
+    def open_dm(self, uid):
+        """The channel id of the conversation with `uid` (created if new)."""
+        if self.dm_store(uid) is None:
+            return None
+        self.channels_changed.emit()
+        return self.dm_cid(uid)
+
+    def dm_list(self):
+        """[(uid, channel id)] newest conversation first."""
+        rows = [(uid, self.dm_cid(uid), st.last_ts(self.dm_cid(uid))) for uid, st in self.dms.items()]
+        return [(u, c) for u, c, _ in sorted(rows, key=lambda r: -r[2])]
+
+    def store_for(self, cid):
+        if cid and cid.startswith("dm:"):
+            uid = self.dm_peer.get(cid)
+            return self.dms.get(uid) if uid else self.store
+        return self.store
+
+    def store_of_msg(self, mid):
+        if mid in self.store.msg_by_id:
+            return self.store
+        return next((st for st in self.dms.values() if mid in st.msg_by_id), self.store)
+
+    def channel(self, cid):
+        """A text/voice channel of the room, or a conversation: {id, kind, name, topic}."""
+        if cid and cid.startswith("dm:"):
+            uid = self.dm_peer.get(cid)
+            return {"id": cid, "kind": "dm", "name": self.name_of(uid), "topic": "", "peer": uid} if uid else None
+        return self.store.channel(cid)
+
+    def peer_version(self, uid):
+        return str(self.mesh.peers().get(uid, {}).get("version") or "")
+
+    def _accept_dm(self, uid, ev):
+        """Only the two of us write into our conversation, and only into it."""
+        if not isinstance(ev, dict) or ev.get("a") not in (self.me, uid):
+            return False
+        if ev.get("k") not in ("msg", "edit", "del", "react", "pin"):
+            return False
+        return ev.get("k") != "msg" or ev.get("ch") == self.dm_cid(uid)
+
+    def _send_dm_vector(self, uid, ask):
+        st = self.dms.get(uid)
+        if st is not None:
+            self.mesh.send(uid, {"t": "dm_vv", "v": st.vector(), "ask": ask})
+
+    # ── search & pins ───────────────────────────────────────────────
+    def search(self, query, cid=None, limit=200):
+        """[(channel id, message)] newest first — the room's channels and our conversations."""
+        stores = [self.store_for(cid)] if cid else [self.store, *self.dms.values()]
+        found = [m for st in stores for m in st.search(query, cid, limit)]
+        found = [m for m in found if self.channel(m["ch"])]          # not in deleted channels
+        found.sort(key=Store.sort_key, reverse=True)
+        return found[:limit]
+
+    def toggle_pin(self, mid):
+        st = self.store_of_msg(mid)
+        self._publish("pin", store=st, target=mid, on=not st.is_pinned(mid))
+
     # ── invites & known peers (for connecting over the internet) ─────
     def _remember(self, uid, info):
         if uid == self.me or not UID_RE.match(uid):
@@ -252,6 +342,7 @@ class Core(QObject):
                                                    if u != uid and u in known}})
         for fid in list(self.wanted):
             self.request_file(fid)
+        self._send_dm_vector(uid, ask=True)
         self.members_changed.emit()
 
     def _on_peer_down(self, uid):
@@ -298,6 +389,25 @@ class Core(QObject):
                 self.mesh.broadcast({"t": "ev", "e": fresh}, exclude=uid)  # gossip onwards
                 for ev in fresh:
                     self._on_event(ev, live=len(msg["e"]) < 5)
+        elif t == "dm_vv" and isinstance(msg.get("v"), dict):
+            # they have something for us (or we for them): open the conversation on our side too
+            st = self.dm_store(uid, create=bool(msg["v"]) or uid in self.dms)
+            if st is not None:
+                missing = [ev for ev in st.missing_for(msg["v"]) if self._accept_dm(uid, ev)]
+                for i in range(0, len(missing), 300):
+                    self.mesh.send(uid, {"t": "dm_ev", "e": missing[i:i + 300]})
+                if msg.get("ask"):
+                    self._send_dm_vector(uid, ask=False)
+        elif t == "dm_ev" and isinstance(msg.get("e"), list):
+            events = [e for e in msg["e"][:1000] if self._accept_dm(uid, e)]
+            if events:
+                st = self.dm_store(uid)
+                new_conversation = not st.messages
+                fresh = [ev for ev in (st.add(e) for e in events) if ev]
+                for ev in fresh:
+                    self._on_event(ev, live=len(events) < 5, store=st)
+                if fresh and new_conversation:
+                    self.channels_changed.emit()
         elif t == "state" and isinstance(msg.get("state"), dict):
             self._set_state(uid, msg["state"])
         elif t == "spk":
@@ -306,6 +416,8 @@ class Core(QObject):
             self.speaking_changed.emit(uid, st["speaking"])
         elif t == "typing":
             cid = str(msg.get("ch", ""))
+            if cid.startswith("dm:") and self.dm_peer.get(cid) != uid:
+                return                   # only the other person writes in our conversation
             self.typing.setdefault(cid, {})[uid] = time.monotonic() + TYPING_TTL
             self.typing_changed.emit(cid)
         elif t == "watch":
@@ -328,30 +440,37 @@ class Core(QObject):
             self.request_file(str(msg.get("id", "")))
 
     # ── events → UI ─────────────────────────────────────────────────
-    def _publish(self, event_kind, **payload):
-        ev = self.store.create(event_kind, **payload)
+    def _publish(self, event_kind, store=None, **payload):
+        store = store or self.store
+        ev = store.create(event_kind, **payload)
         if ev:
-            self.mesh.broadcast({"t": "ev", "e": [ev]})
-            self._on_event(ev, live=True)
+            if store is self.store:
+                self.mesh.broadcast({"t": "ev", "e": [ev]})
+            else:                      # a conversation: to that one person, never gossiped
+                peer = next(u for u, st in self.dms.items() if st is store)
+                self.mesh.send(peer, {"t": "dm_ev", "e": [ev]})
+            self._on_event(ev, live=True, store=store)
         return ev
 
-    def _on_event(self, ev, live):
+    def _on_event(self, ev, live, store=None):
+        store = store or self.store
         k = ev["k"]
         if k == "msg":
-            msg = self.store.msg_by_id[ev["id"]]
+            msg = store.msg_by_id[ev["id"]]
+            peer = self.dm_peer.get(msg["ch"])
             for f in msg["files"]:
                 if not self.file_path(f["id"]):
-                    self.request_file(f["id"], prefer=msg["author"])
+                    self.request_file(f["id"], prefer=msg["author"], only=peer)
             self.typing.get(msg["ch"], {}).pop(msg["author"], None)
             self.message_added.emit(msg["ch"], msg)
             if live and msg["author"] != self.me:
-                self._maybe_notify(msg)
-        elif k in ("edit", "react"):
-            m = self.store.msg_by_id.get(ev["target"])
+                self._maybe_notify(msg, store)
+        elif k in ("edit", "react", "pin"):
+            m = store.msg_by_id.get(ev["target"])
             if m:
                 self.message_changed.emit(m["ch"], m["id"])
         elif k == "del":
-            m = self.store.msg_by_id.get(ev["target"])
+            m = store.msg_by_id.get(ev["target"])
             if m:
                 self.message_removed.emit(m["ch"], m["id"])
         elif k in ("ch_new", "ch_ren", "ch_del"):
@@ -371,19 +490,22 @@ class Core(QObject):
         name = re.escape(self.s["name"])
         return bool(name and re.search(rf"@({name}|все|everyone)(?!\w)", text, re.IGNORECASE))
 
-    def _maybe_notify(self, msg):
-        text = self.store.text_of(msg)
-        mention = self.mentions_me(text)
-        if self.s["notify_mentions_only"] and not mention:
+    def _maybe_notify(self, msg, store):
+        text = store.text_of(msg)
+        personal = msg["ch"].startswith("dm:")          # a direct message counts as a mention
+        if self.s["notify_mentions_only"] and not (personal or self.mentions_me(text)):
             return
-        ch = self.store.channel(msg["ch"])
         body = text or "📎 " + ", ".join(f["name"] for f in msg["files"])
-        self.notify.emit(f"{self.name_of(msg['author'])}  ·  #{ch['name'] if ch else ''}",
-                         body[:200], msg["ch"])
+        if personal:
+            title = f"{self.name_of(msg['author'])}  ·  лично"
+        else:
+            ch = self.store.channel(msg["ch"])
+            title = f"{self.name_of(msg['author'])}  ·  #{ch['name'] if ch else ''}"
+        self.notify.emit(title, body[:200], msg["ch"])
 
     # ── unread ──────────────────────────────────────────────────────
     def mark_read(self, cid):
-        msgs = self.store.messages.get(cid)
+        msgs = self.store_for(cid).messages.get(cid)
         if msgs:
             last = msgs[-1]["ts"]
             if self.s["read"].get(cid, 0) < last:
@@ -394,13 +516,15 @@ class Core(QObject):
     def unread(self, cid):
         """(unread count, mentions) for a text channel."""
         since = self.s["read"].get(cid, 0)
+        store = self.store_for(cid)
+        personal = cid.startswith("dm:")
         count = mentions = 0
-        for m in reversed(self.store.messages.get(cid, [])):
+        for m in reversed(store.messages.get(cid, [])):
             if m["ts"] <= since:
                 break
-            if m["author"] != self.me and m["id"] not in self.store.deleted:
+            if m["author"] != self.me and m["id"] not in store.deleted:
                 count += 1
-                mentions += self.mentions_me(self.store.text_of(m))
+                mentions += personal or self.mentions_me(store.text_of(m))
         return count, mentions
 
     # ── text actions ────────────────────────────────────────────────
@@ -412,26 +536,31 @@ class Core(QObject):
                 metas.append(meta)
         text = text.strip()
         if text or metas:
-            self._publish("msg", ch=cid, text=text, reply=reply, files=metas)
+            self._publish("msg", store=self.store_for(cid), ch=cid, text=text, reply=reply, files=metas)
             self.mark_read(cid)
 
     def edit_message(self, mid, text):
         if author_of(mid) == self.me:
-            self._publish("edit", target=mid, text=text.strip())
+            self._publish("edit", store=self.store_of_msg(mid), target=mid, text=text.strip())
 
     def delete_message(self, mid):
         if author_of(mid) == self.me:
-            self._publish("del", target=mid)
+            self._publish("del", store=self.store_of_msg(mid), target=mid)
 
     def toggle_reaction(self, mid, emoji):
-        on = self.me not in self.store.reactions_of(mid).get(emoji, [])
-        self._publish("react", target=mid, emoji=emoji, on=on)
+        st = self.store_of_msg(mid)
+        on = self.me not in st.reactions_of(mid).get(emoji, [])
+        self._publish("react", store=st, target=mid, emoji=emoji, on=on)
 
     def send_typing(self, cid):
         now = time.monotonic()
         if now - self._last_typing > 3:
             self._last_typing = now
-            self.mesh.broadcast({"t": "typing", "ch": cid})
+            peer = self.dm_peer.get(cid)
+            if peer:                       # who writes to whom stays between the two of them
+                self.mesh.send(peer, {"t": "typing", "ch": cid})
+            else:
+                self.mesh.broadcast({"t": "typing", "ch": cid})
 
     def typers(self, cid):
         now = time.monotonic()
@@ -605,11 +734,15 @@ class Core(QObject):
         ctype = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
         return {"id": fid, "name": path.name[:120], "size": size, "type": ctype}
 
-    def request_file(self, fid, prefer=None):
+    def request_file(self, fid, prefer=None, only=None):
+        """only: a file from a direct message is asked of that person alone."""
         if not re.fullmatch(r"[0-9a-f]{32}", fid) or self.file_path(fid) or fid in self.downloads:
             return
+        if only:
+            self._private_files[fid] = only
+        only = only or self._private_files.get(fid)
         asked = self.wanted.setdefault(fid, set())
-        peers = [u for u in self.mesh.peers() if u not in asked]
+        peers = [u for u in self.mesh.peers() if u not in asked and (only is None or u == only)]
         if prefer in peers:
             peers.remove(prefer)
             peers.insert(0, prefer)

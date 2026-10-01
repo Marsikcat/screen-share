@@ -29,7 +29,8 @@ FILE_ID_RE = re.compile(r"^[0-9a-f]{32}$")
 # 3.0–3.2 cut them to 64 characters, which broke replies, reactions, edits, deletes and
 # messages in user-created channels.
 ID_LIMIT = 96
-KINDS = {"msg", "edit", "del", "react", "ch_new", "ch_ren", "ch_del", "profile", "room", "avatar"}
+KINDS = {"msg", "edit", "del", "react", "ch_new", "ch_ren", "ch_del", "profile", "room", "avatar",
+         "pin"}
 
 # Fixed ids so every peer has the same starter channels without coordination.
 DEFAULT_CHANNELS = [
@@ -89,7 +90,7 @@ def validate(ev, legacy=False, need_sig=True):
         out["files"] = files
         if not out["ch"] or not (out["text"] or files):
             return None
-    elif k in ("edit", "del", "react", "ch_ren", "ch_del"):
+    elif k in ("edit", "del", "react", "ch_ren", "ch_del", "pin"):
         out["target"] = clean(ev.get("target"), ID_LIMIT)
         if not out["target"]:
             return None
@@ -103,6 +104,8 @@ def validate(ev, legacy=False, need_sig=True):
         elif k == "ch_ren":
             out["name"] = clean(ev.get("name"), 32)
             out["topic"] = clean(ev.get("topic"), 200)
+        elif k == "pin":
+            out["on"] = bool(ev.get("on"))
     elif k == "ch_new":
         out["kind"] = "voice" if ev.get("kind") == "voice" else "text"
         out["name"] = clean(ev.get("name"), 32)
@@ -136,6 +139,7 @@ class Store:
         self.edits = {}             # msg id -> (ts, event id, text)
         self.deleted = set()
         self.reactions = {}         # msg id -> {emoji: {uid: (ts, event id, on)}}
+        self.pins = {}              # msg id -> (ts, event id, pinned, by whom) — last one wins
         self.profiles = {}          # uid -> {name, color, _v}
         self.avatars = {}           # uid -> (ts, event id, file id or "")
         self.room_name = (0, "", "")
@@ -254,6 +258,10 @@ class Store:
             cur = self.avatars.get(ev["a"])
             if cur is None or v > cur[:2]:
                 self.avatars[ev["a"]] = (*v, ev["file"])
+        elif k == "pin":                 # anyone in the room may pin, as in a small Discord server
+            cur = self.pins.get(ev["target"])
+            if cur is None or v > cur[:2]:
+                self.pins[ev["target"]] = (*v, ev["on"], ev["a"])
 
     # ── queries ─────────────────────────────────────────────────────
     @staticmethod
@@ -285,6 +293,35 @@ class Store:
             if on:
                 out[emoji] = on
         return out
+
+    def is_pinned(self, mid):
+        pin = self.pins.get(mid)
+        return bool(pin and pin[2]) and mid not in self.deleted
+
+    def pinned(self, cid):
+        """Pinned messages of a channel, the most recently pinned first."""
+        msgs = [m for m in self.messages.get(cid, []) if self.is_pinned(m["id"])]
+        return sorted(msgs, key=lambda m: self.pins[m["id"]][:2], reverse=True)
+
+    def search(self, query, cid=None, limit=200):
+        """Messages whose text (or attached file name) has every word of `query`, newest first."""
+        words = [w for w in query.casefold().split() if w]
+        if not words:
+            return []
+        out = []
+        for ch in ([cid] if cid else list(self.messages)):
+            for m in self.messages.get(ch, []):
+                if m["id"] in self.deleted:
+                    continue
+                hay = " ".join([self.text_of(m), *(f["name"] for f in m["files"])]).casefold()
+                if all(w in hay for w in words):
+                    out.append(m)
+        out.sort(key=self.sort_key, reverse=True)
+        return out[:limit]
+
+    def last_ts(self, cid):
+        msgs = self.messages.get(cid)
+        return msgs[-1]["ts"] if msgs else 0
 
     def avatar_of(self, uid):
         return (self.avatars.get(uid) or (0, "", ""))[2]

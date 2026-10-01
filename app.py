@@ -4,6 +4,7 @@ MarinCall — text & voice channels and screen share over LAN / Radmin VPN, no s
 
     python app.py              open the app
     python app.py --autostart  launched by Windows at logon (may start in the tray)
+    python app.py --stream-worker <json>   the screen-share encoder (started by the app)
 """
 
 import os
@@ -130,4 +131,8 @@ def main():
 
 
 if __name__ == "__main__":
+    if len(sys.argv) > 2 and sys.argv[1] == "--stream-worker":
+        # the screen-share encoder: a separate process of this same exe, no window, no Qt
+        from marincall import streamworker
+        sys.exit(streamworker.main(sys.argv[2]))
     sys.exit(main())

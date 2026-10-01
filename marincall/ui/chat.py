@@ -8,11 +8,13 @@ from PySide6.QtCore import QPoint, Qt, QTimer, Signal
 from PySide6.QtWidgets import (QFileDialog, QFrame, QHBoxLayout, QLabel, QPlainTextEdit,
                                QScrollArea, QToolButton, QVBoxLayout, QWidget)
 
+from ..updater import parse_version
 from . import icons
 from .message import DateDivider, MessageWidget, day_title
 from .richtext import QUICK_REACTIONS, EmojiPicker
+from .search import MessageCard
 from .theme import T
-from .widgets import IconButton, label
+from .widgets import Avatar, IconButton, label
 
 PAGE = 80
 GROUP_GAP_MS = 7 * 60 * 1000
@@ -43,11 +45,13 @@ class HoverToolbar(QFrame):
         self.more.clicked.connect(self._pick)
         self.reply = IconButton("reply", "Ответить", 18, 30)
         self.reply.clicked.connect(lambda: self.target and view.reply_to(self.target.msg))
+        self.pin = IconButton("pin", "Закрепить", 18, 30)
+        self.pin.clicked.connect(lambda: self.target and view.core.toggle_pin(self.target.msg["id"]))
         self.edit = IconButton("edit", "Изменить", 18, 30)
         self.edit.clicked.connect(lambda: self.target and self.target.start_edit())
         self.delete = IconButton("trash", "Удалить", 18, 30)
         self.delete.clicked.connect(lambda: self.target and view.core.delete_message(self.target.msg["id"]))
-        for b in (self.more, self.reply, self.edit, self.delete):
+        for b in (self.more, self.reply, self.pin, self.edit, self.delete):
             b.hover_bg = T.c["hover"]
             lay.addWidget(b)
         self.hide()
@@ -57,6 +61,8 @@ class HoverToolbar(QFrame):
         mine = w.msg["author"] == self.view.core.me
         self.edit.setVisible(mine)
         self.delete.setVisible(mine)
+        pinned = w.store.is_pinned(w.msg["id"])
+        self.pin.setToolTip("Открепить" if pinned else "Закрепить — сообщение будет в списке 📌 канала")
         self.adjustSize()
         pos = w.mapTo(self.parent(), QPoint(w.width() - self.width() - 20, -14))
         self.move(pos.x(), max(0, pos.y()))
@@ -91,6 +97,10 @@ class MessageList(QScrollArea):
         self.setWidget(self.content)
         self.toolbar = HoverToolbar(self.content, view)
         self.verticalScrollBar().valueChanged.connect(self._on_scroll)
+        # at the bottom stays at the bottom whatever makes the chat taller: pictures, reactions,
+        # a narrower window (the search panel), lines re-wrapping
+        self._stick = True
+        self.verticalScrollBar().rangeChanged.connect(self._on_range)
         self._loading = False
 
     def at_bottom(self):
@@ -116,7 +126,7 @@ class MessageList(QScrollArea):
         if keep_scroll and cid == self.cid and self.at_bottom() and not self._loading:
             keep_scroll = False                 # rebuilt while at the bottom: stay at the bottom
         self.cid = cid
-        msgs = self.core.store.visible_messages(cid)
+        msgs = self.core.store_for(cid).visible_messages(cid)
         if not keep_scroll:
             self.start = max(0, len(msgs) - PAGE)
         self.start = min(self.start, max(0, len(msgs) - 1)) if msgs else 0
@@ -133,10 +143,16 @@ class MessageList(QScrollArea):
             self.scroll_bottom()
 
     def _welcome(self):
-        ch = self.core.store.channel(self.cid) or {"name": ""}
+        ch = self.core.channel(self.cid) or {"name": "", "kind": "text"}
         w = QWidget()
         lay = QVBoxLayout(w)
         lay.setContentsMargins(16, 24, 16, 8)
+        if ch["kind"] == "dm":
+            lay.addWidget(Avatar.of(self.core.member(ch["peer"]), 72))
+            lay.addWidget(label(ch["name"], "h1"))
+            lay.addWidget(label(f"Начало личной переписки. Её видите только вы и {ch['name']}: сообщения "
+                                f"идут напрямую и хранятся только на ваших компьютерах.", "muted", wrap=True))
+            return w
         badge = QLabel()
         badge.setFixedSize(68, 68)
         badge.setAlignment(Qt.AlignCenter)
@@ -158,7 +174,7 @@ class MessageList(QScrollArea):
             widgets.append(DateDivider(m["ts"]))
         w = MessageWidget(self.core, m, first=not self._group_with(m, prev))
         w.hovered.connect(self.toolbar.attach)
-        w.reply_clicked.connect(self.jump_to)
+        w.reply_clicked.connect(self.reveal)
         widgets.append(w)
         for x in widgets:
             if index is None:
@@ -171,7 +187,7 @@ class MessageList(QScrollArea):
 
     def append(self, msg):
         stick = self.at_bottom() or msg["author"] == self.core.me
-        msgs = self.core.store.visible_messages(self.cid)
+        msgs = self.core.store_for(self.cid).visible_messages(self.cid)
         if msgs and msgs[-1]["id"] == msg["id"]:
             prev = self.shown[-1][0] if self.shown else None
             self._add(msg, prev)
@@ -199,10 +215,25 @@ class MessageList(QScrollArea):
         if stick:                           # a picture arrived and pushed the chat up
             self.scroll_bottom()
 
-    def jump_to(self, mid):
+    def reveal(self, mid):
+        """Scroll to a message (loading older history if needed) and light it up."""
+        msgs = self.core.store_for(self.cid).visible_messages(self.cid)
+        idx = next((i for i, m in enumerate(msgs) if m["id"] == mid), None)
+        if idx is None:
+            return False
+        self._loading = True                    # no paging or bottom-sticking while we jump
+        if idx < self.start:
+            self.start = max(0, idx - 15)
+            self.set_channel(self.cid, keep_scroll=True)
         w = self.widget_for(mid)
-        if w:
-            self.ensureWidgetVisible(w, 0, 120)
+
+        def go():
+            if w is not None:
+                self.ensureWidgetVisible(w, 0, max(60, self.viewport().height() // 3))
+                w.flash()
+            QTimer.singleShot(300, self._done_jumping)
+        QTimer.singleShot(80, go)
+        return True
 
     def edit_last_own(self):
         for m, w in reversed(self.shown):
@@ -211,7 +242,17 @@ class MessageList(QScrollArea):
                 self.ensureWidgetVisible(w)
                 return
 
+    def _done_jumping(self):
+        self._loading = False
+        self._stick = self.at_bottom()        # reading old messages now: don't pull back down
+
+    def _on_range(self, _lo, hi):
+        if self._stick and not self._loading:
+            self.verticalScrollBar().setValue(hi)
+
     def _on_scroll(self, value):
+        if not self._loading:
+            self._stick = value >= self.verticalScrollBar().maximum() - 40
         if value == 0 and self.start > 0 and not self._loading:
             self._loading = True
             sb = self.verticalScrollBar()
@@ -223,6 +264,58 @@ class MessageList(QScrollArea):
                 sb.setValue(sb.maximum() - before)
                 self._loading = False
             QTimer.singleShot(30, restore)
+
+
+class PinsPopup(QFrame):
+    """The 📌 list of a channel: click a message to go to it, × to unpin."""
+
+    def __init__(self, view):
+        super().__init__(view.window(), Qt.Popup | Qt.FramelessWindowHint)
+        self.view = view
+        self.setAttribute(Qt.WA_DeleteOnClose)
+        self.setObjectName("PinsPopup")
+        self.setStyleSheet(f"#PinsPopup {{ background: {T.c['side']}; border: 1px solid {T.c['border']};"
+                           f"border-radius: 8px; }}")
+        self.setFixedWidth(T.px(420))
+        v = QVBoxLayout(self)
+        v.setContentsMargins(12, 12, 12, 12)
+        v.setSpacing(8)
+        head = QHBoxLayout()
+        ic = QLabel()
+        ic.setPixmap(icons.pixmap("pin", T.c["header"], 18))
+        head.addWidget(ic)
+        head.addWidget(label("Закреплённые сообщения", "h2"), 1)
+        v.addLayout(head)
+        core, cid = view.core, view.cid
+        pinned = core.store_for(cid).pinned(cid)
+        if not pinned:
+            v.addWidget(label("Здесь пока ничего не закреплено. Наведите на сообщение и нажмите 📌 — "
+                              "оно появится в этом списке у всех.", "hint", wrap=True))
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        body = QWidget()
+        col = QVBoxLayout(body)
+        col.setContentsMargins(0, 0, 4, 0)
+        col.setSpacing(6)
+        for m in pinned[:50]:
+            card = MessageCard(core, m, show_channel=False,
+                               action=("x", "Открепить", lambda _=False, mid=m["id"]: self._unpin(mid)))
+            card.clicked.connect(self._open)
+            col.addWidget(card)
+        col.addStretch(1)
+        scroll.setWidget(body)
+        scroll.setVisible(bool(pinned))
+        scroll.setFixedHeight(min(460, 90 * len(pinned) + 10))
+        v.addWidget(scroll)
+
+    def _open(self, cid, mid):
+        self.close()
+        self.view.list.reveal(mid)
+
+    def _unpin(self, mid):
+        self.view.core.toggle_pin(mid)
+        self.close()
 
 
 class InputBox(QPlainTextEdit):
@@ -332,8 +425,8 @@ class Composer(QWidget):
         self.typing.setStyleSheet(f"color: {T.c['text']}; font-size: {T.px(8)}pt; padding-left: 4px;")
         lay.addWidget(self.typing)
 
-    def set_placeholder(self, name):
-        self.input.setPlaceholderText(f"Написать в #{name}")
+    def set_placeholder(self, where):
+        self.input.setPlaceholderText(f"Написать {where}" if where.startswith("@") else f"Написать в {where}")
 
     def _typing(self):
         if self.input.toPlainText().strip() and self.view.cid:
@@ -424,6 +517,7 @@ class Composer(QWidget):
 
 class ChatView(QWidget):
     members_toggled = Signal()
+    search_requested = Signal()
 
     def __init__(self, core):
         super().__init__()
@@ -451,9 +545,16 @@ class ChatView(QWidget):
         members = IconButton("users", "Список участников", 22, 34, checkable=True)
         members.setChecked(True)
         members.clicked.connect(self.members_toggled.emit)
+        pins = IconButton("pin", "Закреплённые сообщения", 22, 34)
+        pins.clicked.connect(self.show_pins)
+        self.pins_btn = pins
+        search = IconButton("search", "Поиск по сообщениям (Ctrl+F)", 22, 34)
+        search.clicked.connect(self.search_requested.emit)
         for w in (self.h_icon, self.h_name, self.h_sep, self.h_topic):
             h.addWidget(w)
         h.addStretch(1)
+        h.addWidget(pins)
+        h.addWidget(search)
         h.addWidget(members)
         lay.addWidget(header)
         self.list = MessageList(self)
@@ -470,15 +571,22 @@ class ChatView(QWidget):
         core.members_changed.connect(self._on_members)
 
     def set_channel(self, cid):
-        ch = self.core.store.channel(cid)
+        ch = self.core.channel(cid)
         if not ch:
             return
         changed = cid != self.cid
         self.cid = cid
+        dm = ch["kind"] == "dm"
+        self.h_icon.setPixmap(icons.pixmap("at" if dm else "hash", T.c["muted"], 22))
         self.h_name.setText(ch["name"])
-        self.h_topic.setText(ch["topic"])
-        self.h_sep.setVisible(bool(ch["topic"]))
-        self.composer.set_placeholder(ch["name"])
+        topic = ch["topic"]
+        if dm:
+            version = self.core.peer_version(ch["peer"])
+            if version and parse_version(version) < (3, 4):
+                topic = f"у собеседника версия {version} — личные сообщения дойдут, когда он обновится"
+        self.h_topic.setText(topic)
+        self.h_sep.setVisible(bool(topic))
+        self.composer.set_placeholder(("@" if dm else "#") + ch["name"])
         if changed:
             self.composer.clear_reply()
             self.list.set_channel(cid)
@@ -488,6 +596,15 @@ class ChatView(QWidget):
 
     def reply_to(self, msg):
         self.composer.reply_to(msg)
+
+    def show_pins(self):
+        if not self.cid:
+            return
+        popup = PinsPopup(self)
+        popup.adjustSize()
+        anchor = self.pins_btn.mapToGlobal(self.pins_btn.rect().bottomRight())
+        popup.move(anchor.x() - popup.width(), anchor.y() + 6)
+        popup.show()
 
     def _on_changed(self, cid, mid):
         if cid == self.cid:

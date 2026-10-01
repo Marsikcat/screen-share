@@ -1,12 +1,12 @@
 """
 Screen share inside voice channels.
 
-Same idea as ScreenShare: FFmpeg captures (DXGI Desktop Duplication for
-monitors, GDI for windows), encodes with NVENC when available, and emits
-MPEG-TS to a local relay. The relay feeds one QUIC stream per viewer (iroh:
-lost packets are retransmitted, it works through NAT, and if a viewer's link
-can't keep up the oldest data is dropped rather than letting delay pile up),
-so viewers can come and go without restarting FFmpeg. On the viewer's side
+A worker process (streamworker.py — FFmpeg's libraries through PyAV, no ffmpeg.exe)
+captures (DXGI Desktop Duplication for monitors, GDI for windows), encodes with NVENC
+when available and sends MPEG-TS to the app over loopback TCP. The relay feeds one
+QUIC stream per viewer (iroh: lost packets are retransmitted, it works through NAT,
+and if a viewer's link can't keep up the oldest data is dropped rather than letting
+delay pile up), so viewers can come and go without restarting the encoder. On the viewer's side
 the stream is decoded right in the app (PyAV) and shown in the voice channel;
 its sound goes into the same output as the voices, so echo cancellation
 knows about it.
@@ -17,17 +17,20 @@ loopback.py) — the people watching hear the game, not their own voices.
 
 import ctypes
 import ctypes.wintypes as wt
+import json
 import os
 import socket
 import subprocess
+import sys
 import threading
 import time
+from fractions import Fraction
 
 from PySide6.QtCore import QObject, Qt, Signal
 from PySide6.QtGui import QImage
 
 from . import loopback
-from .config import FFMPEG_BIN, STREAM_RELAY_PORT
+from .config import FROZEN, ROOT
 
 SYSTEM_AUDIO = "system"         # stream_audio value: process loopback without our own sounds
 
@@ -62,8 +65,8 @@ _job = None
 
 
 def _tie_to_us(proc):
-    """If MarinCall dies (a crash, Task Manager) Windows ends FFmpeg too, instead of leaving it
-    capturing the screen and loading the GPU until the next reboot."""
+    """If MarinCall dies (a crash, Task Manager) Windows ends the encoder too, instead of leaving
+    it capturing the screen and loading the GPU until the next reboot."""
     global _job
     if os.name != "nt":
         return
@@ -83,15 +86,17 @@ def _tie_to_us(proc):
 
 
 def has_nvenc():
+    """Is there an NVIDIA encoder? (opening it fails without a suitable GPU and driver)"""
     global _nvenc
     if _nvenc is None:
         try:
-            r = subprocess.run(
-                [str(FFMPEG_BIN), "-hide_banner", "-f", "lavfi", "-i", "color=c=black:s=640x480:d=0.1",
-                 "-c:v", "h264_nvenc", "-f", "null", "-"],
-                capture_output=True, timeout=10, creationflags=NO_WINDOW)
-            _nvenc = r.returncode == 0
-        except (OSError, subprocess.SubprocessError):
+            import av
+            ctx = av.CodecContext.create("h264_nvenc", "w")
+            ctx.width, ctx.height, ctx.pix_fmt = 640, 480, "yuv420p"
+            ctx.time_base = Fraction(1, 30)
+            ctx.open()
+            _nvenc = True
+        except Exception:
             _nvenc = False
     return _nvenc
 
@@ -255,68 +260,35 @@ def audio_choices():
 
 def list_audio_devices():
     """DirectShow audio inputs, loopback-style devices first ("Stereo Mix", "CABLE"…)."""
-    if not FFMPEG_BIN.exists():
-        return []
     try:
-        r = subprocess.run([str(FFMPEG_BIN), "-hide_banner", "-list_devices", "true", "-f", "dshow",
-                            "-i", "dummy"], capture_output=True, timeout=8, creationflags=NO_WINDOW)
-    except (OSError, subprocess.SubprocessError):
+        import av
+        import av.logging
+    except ImportError:
         return []
     names = []
-    for line in r.stderr.decode("utf-8", errors="replace").splitlines():
-        if "(audio)" in line and '"' in line:
-            names.append(line.split('"')[1])
+    old = av.logging.get_level()
+    try:
+        av.logging.set_level(av.logging.INFO)          # FFmpeg prints the list as log lines
+        with av.logging.Capture() as logs:
+            try:
+                av.open("dummy", format="dshow", options={"list_devices": "true"})
+            except Exception:
+                pass
+        for _level, _name, line in logs:
+            if "(audio)" in line and '"' in line:
+                names.append(line.split('"')[1])
+    finally:
+        av.logging.set_level(old)
     loop_kw = ("stereo mix", "стерео микшер", "cable", "loopback", "what u hear", "virtual")
     return sorted(dict.fromkeys(names), key=lambda n: not any(k in n.lower() for k in loop_kw))
 
 
 # ── sender ──────────────────────────────────────────────────────────
-class _AudioFeed(threading.Thread):
-    """Process-loopback capture → FFmpeg's stdin, as a steady raw PCM stream."""
-
-    def __init__(self):
-        super().__init__(daemon=True, name="stream-audio")
-        self.ready = threading.Event()      # capture opened (or failed: see .error)
-        self.go = threading.Event()         # FFmpeg started: .proc is set
-        self.error = None
-        self.proc = None
-        self.stopping = False
-
-    def run(self):
-        cap = loopback.LoopbackCapture(os.getpid())
-        try:
-            cap.open()
-        except OSError as e:
-            self.error = str(e)
-            self.ready.set()
-            return
-        self.ready.set()
-        self.go.wait()
-        proc = self.proc
-        try:
-            if proc is None:
-                return
-            cap.restart_clock()
-            while not self.stopping and proc.poll() is None:
-                data = cap.read()
-                if data:
-                    t0 = time.perf_counter()
-                    proc.stdin.write(data)
-                    proc.stdin.flush()
-                    if time.perf_counter() - t0 > 0.1:
-                        cap.restart_clock()      # FFmpeg was still starting up: begin the timeline now
-        except (OSError, ValueError):
-            pass
-        finally:
-            cap.close()
-            try:
-                proc and proc.stdin and proc.stdin.close()
-            except OSError:
-                pass
-
-    def stop(self):
-        self.stopping = True
-        self.go.set()
+def _worker_command(cfg):
+    arg = json.dumps(cfg, ensure_ascii=False)
+    if FROZEN:
+        return [sys.executable, "--stream-worker", arg]
+    return [sys.executable, str(ROOT / "app.py"), "--stream-worker", arg]
 
 
 class StreamSender(QObject):
@@ -327,105 +299,43 @@ class StreamSender(QObject):
         super().__init__()
         self.mesh = mesh
         self.proc = None
-        self._feed = None
         self.outs = {}              # viewer uid -> net.OutStream
         self.running = False
-        self._relay = None
+        self.encoder_label = ""
+        self._conn = None
         self._err_tail = []
         self._bytes = 0             # for the live bitrate shown to the streamer
         self._mark = (0.0, 0)
         self._rate = 0.0
 
-    def build_command(self, source, quality, encoder, audio):
-        q = QUALITY.get(quality, QUALITY["1080p60"])
-        fps, kbps = q["fps"], q["kbps"]
-        nvenc = encoder == "nvenc" or (encoder == "auto" and has_nvenc())
-        src_h = source.get("height") or 0
-        scale = q["h"] if q["h"] and src_h and src_h > q["h"] else None
-
-        cmd = [str(FFMPEG_BIN), "-hide_banner", "-loglevel", "warning", "-stats_period", "2"]
-        vf = []
-        gpu_direct = False
-        if source["kind"] == "monitor" and source.get("dxgi") is not None:
-            cmd += ["-f", "lavfi", "-i", f"ddagrab=output_idx={source['dxgi']}:framerate={fps}:draw_mouse=1"]
-            gpu_direct = nvenc and not scale  # NVENC takes the D3D11 frames as they are
-            if not gpu_direct:
-                vf += ["hwdownload", "format=bgra"]
-        elif source["kind"] == "monitor":
-            cmd += ["-f", "gdigrab", "-framerate", str(fps), "-draw_mouse", "1",
-                    "-offset_x", str(source["left"]), "-offset_y", str(source["top"]),
-                    "-video_size", f"{source['width']}x{source['height']}", "-i", "desktop"]
-        else:
-            cmd += ["-f", "gdigrab", "-framerate", str(fps), "-draw_mouse", "1",
-                    "-i", f"title={source['title']}"]
-            vf.append("scale=trunc(iw/2)*2:trunc(ih/2)*2")  # windows can have odd sizes
-        if scale:
-            vf.append(f"scale=-2:{scale}:flags=bicubic")
-        if not gpu_direct:
-            vf.append("format=yuv420p")
-        if audio == SYSTEM_AUDIO:
-            cmd += ["-f", "s16le", "-ar", str(loopback.SR), "-ac", str(loopback.CHANNELS),
-                    "-thread_queue_size", "1024", "-i", "pipe:0"]
-        elif audio:
-            cmd += ["-f", "dshow", "-audio_buffer_size", "50", "-i", f"audio={audio}"]
-        if vf:
-            cmd += ["-vf", ",".join(vf)]
-        cmd += ["-map", "0:v"] + (["-map", "1:a"] if audio else [])
-
-        if nvenc:
-            cmd += ["-c:v", "h264_nvenc", "-preset", "p4", "-tune", "ll", "-rc", "cbr",
-                    "-zerolatency", "1", "-bf", "0"]
-        else:
-            cmd += ["-c:v", "libx264", "-preset", "superfast" if fps >= 60 else "veryfast",
-                    "-tune", "zerolatency"]
-        # a keyframe every second: someone who starts watching sees the picture that soon
-        cmd += ["-b:v", f"{kbps}k", "-maxrate", f"{kbps}k", "-bufsize", f"{kbps // 2}k",
-                "-g", str(fps)]
-        if audio:
-            cmd += ["-c:a", "aac", "-b:a", "160k", "-ar", "48000", "-ac", "2"]
-        cmd += ["-f", "mpegts", "-muxdelay", "0", "-muxpreload", "0", "-flush_packets", "1",
-                f"udp://127.0.0.1:{STREAM_RELAY_PORT}?pkt_size=1316"]
-        return cmd, nvenc
-
     def start(self, source, quality, encoder="auto", audio=""):
         self.stop()
-        if not FFMPEG_BIN.exists():
-            self.stopped.emit("FFmpeg не найден — запустите setup.bat")
-            return False
-        feed = None
-        if audio == SYSTEM_AUDIO:
-            feed = _AudioFeed()
-            feed.start()
-            feed.ready.wait(6)
-            if feed.error or not feed.ready.is_set():
-                self.warning.emit("Звук компьютера захватить не удалось"
-                                  + (f" ({feed.error})" if feed.error else "") + " — трансляция без звука")
-                feed.stop()
-                feed, audio = None, ""
-        cmd, nvenc = self.build_command(source, quality, encoder, audio)
-        relay = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        q = QUALITY.get(quality, QUALITY["1080p60"])
+        nvenc = encoder == "nvenc" or (encoder == "auto" and has_nvenc())
+        if audio == SYSTEM_AUDIO and not loopback.available():
+            self.warning.emit("Звук компьютера без голосового чата есть только в Windows 10 2004 и новее "
+                              "— трансляция без звука")
+            audio = ""
+        listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+        listener.settimeout(20)
+        cfg = {"source": source, "fps": q["fps"], "height": q["h"], "kbps": q["kbps"],
+               "encoder": "nvenc" if nvenc else "x264", "audio": audio,
+               "port": listener.getsockname()[1], "parent_pid": os.getpid()}
         try:
-            relay.bind(("127.0.0.1", STREAM_RELAY_PORT))
+            self.proc = subprocess.Popen(_worker_command(cfg), stdin=subprocess.DEVNULL,
+                                         stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                                         creationflags=NO_WINDOW)
         except OSError as e:
-            self.stopped.emit(f"Порт {STREAM_RELAY_PORT} занят: {e.strerror or e}")
+            listener.close()
+            self.stopped.emit(f"Не удалось запустить трансляцию: {e}")
             return False
-        # FFmpeg bursts a whole frame at once: without a big receive buffer the datagrams that
-        # arrive while this thread waits for the GIL are lost — smeared blocks for every viewer
-        relay.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 8 * 1024 * 1024)
-        relay.settimeout(0.5)
-        self._relay = relay
+        _tie_to_us(self.proc)
         self.running = True
         self._err_tail = []
         self._bytes, self._mark, self._rate = 0, (0.0, 0), 0.0
-        self.proc = subprocess.Popen(cmd, stdin=subprocess.PIPE if feed else subprocess.DEVNULL,
-                                     stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-                                     creationflags=NO_WINDOW)
-        _tie_to_us(self.proc)
-        if feed:
-            feed.proc = self.proc
-            feed.go.set()
-        self._feed = feed
-        threading.Thread(target=self._relay_loop, args=(relay,), daemon=True).start()
+        threading.Thread(target=self._relay_loop, args=(listener,), daemon=True, name="relay").start()
         threading.Thread(target=self._watch_proc, args=(self.proc,), daemon=True).start()
         self.encoder_label = "NVENC" if nvenc else "CPU (x264)"
         return True
@@ -439,17 +349,30 @@ class StreamSender(QObject):
         for uid in uids - set(self.outs):
             self.outs[uid] = self.mesh.open_stream(uid)
 
-    def _relay_loop(self, relay):
+    def _relay_loop(self, listener):
+        try:
+            conn, _ = listener.accept()
+        except OSError:
+            return                              # the worker never came: _watch_proc says why
+        finally:
+            listener.close()
+        self._conn = conn
+        pending = b""
         while self.running:
             try:
-                data = relay.recv(65536)
-            except socket.timeout:
-                continue
+                data = conn.recv(256 * 1024)
             except OSError:
                 break
+            if not data:
+                break
             self._bytes += len(data)
-            for out in list(self.outs.values()):
-                out.push(data)
+            pending += data
+            n = len(pending) // 188 * 188       # whole TS packets: a dropped chunk never splits one
+            if n:
+                chunk, pending = pending[:n], pending[n:]
+                for out in list(self.outs.values()):
+                    out.push(chunk)
+        conn.close()
 
     def bitrate(self):
         """Mbit/s actually leaving the encoder right now."""
@@ -464,29 +387,30 @@ class StreamSender(QObject):
     def _watch_proc(self, proc):
         for raw in iter(proc.stderr.readline, b""):
             line = raw.decode("utf-8", errors="replace").strip()
-            if line and "frame=" not in line:
-                self._err_tail = (self._err_tail + [line])[-4:]
+            if line.startswith("WARN "):
+                self.warning.emit(line[5:] + " — трансляция без звука")
+            elif line and not line.startswith("OK "):
+                self._err_tail = (self._err_tail + [line])[-3:]
         proc.wait()
         if self.proc is proc and self.running:
             self.running = False
-            self.stopped.emit("FFmpeg завершился: " + (" | ".join(self._err_tail) or f"код {proc.returncode}"))
+            self.stopped.emit("Трансляция прервалась: " + (" | ".join(self._err_tail) or f"код {proc.returncode}"))
 
     def stop(self):
         was = self.running
         self.running = False
-        if self._feed:
-            self._feed.stop()
-            self._feed = None
+        conn, self._conn = self._conn, None
+        if conn:
+            try:
+                conn.close()                    # the worker sees the socket close and exits
+            except OSError:
+                pass
         proc, self.proc = self.proc, None
         if proc:
             try:
-                proc.terminate()
-                proc.wait(timeout=3)
-            except (OSError, subprocess.TimeoutExpired):
+                proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
                 proc.kill()
-        if self._relay:
-            self._relay.close()
-            self._relay = None
         self.set_viewers(())
         return was
 

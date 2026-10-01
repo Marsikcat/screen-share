@@ -1,8 +1,9 @@
 """Right column: who is in the room, online first."""
 
-from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QScrollArea, QVBoxLayout, QWidget
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QMenu, QScrollArea, QVBoxLayout, QWidget
 
+from . import icons
 from .message import readable
 from .sidebar import elide
 from .theme import T
@@ -10,9 +11,12 @@ from .widgets import Avatar
 
 
 class MemberRow(QFrame):
-    def __init__(self, core, m):
+    def __init__(self, core, m, on_dm):
         super().__init__()
-        self.core, self.uid = core, m["uid"]
+        self.core, self.uid, self.on_dm = core, m["uid"], on_dm
+        if self.uid != core.me:
+            self.setCursor(Qt.PointingHandCursor)
+            self.setToolTip("Двойной щелчок — написать лично")
         self.setStyleSheet(f"MemberRow {{ border-radius: 4px; }}"
                            f"MemberRow:hover {{ background: {T.c['hover']}; }}")
         lay = QHBoxLayout(self)
@@ -42,8 +46,20 @@ class MemberRow(QFrame):
         if not m["online"]:
             name.setStyleSheet(f"color: {T.c['muted']}; font-weight: 500;")
 
+    def mouseDoubleClickEvent(self, e):
+        if self.uid != self.core.me:
+            self.on_dm(self.uid)
+
+    def contextMenuEvent(self, e):
+        if self.uid != self.core.me:
+            m = QMenu(self)
+            m.addAction(icons.icon("at", T.c["text"], 16), "Написать лично", lambda: self.on_dm(self.uid))
+            m.exec(e.globalPos())
+
 
 class MemberList(QWidget):
+    dm_requested = Signal(str)
+
     def __init__(self, core):
         super().__init__()
         self.core = core
@@ -81,5 +97,5 @@ class MemberList(QWidget):
             cap.setContentsMargins(8, 12, 0, 4)
             self.col.addWidget(cap)
             for m in group:
-                self.col.addWidget(MemberRow(self.core, m))
+                self.col.addWidget(MemberRow(self.core, m, self.dm_requested.emit))
         self.col.addStretch(1)

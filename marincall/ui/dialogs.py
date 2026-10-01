@@ -144,19 +144,20 @@ class QuickSwitcher(Dialog):
         from PySide6.QtWidgets import QListWidgetItem
         self.list.clear()
         rows = []
-        for kind in ("text", "voice"):
-            for ch in self.core.store.channel_list(kind):
-                score = _fuzzy(text.strip(), ch["name"])
-                if score:
-                    unread = self.core.unread(ch["id"])[0] if kind == "text" else 0
-                    who = len(self.core.voice_members(ch["id"])) if kind == "voice" else 0
-                    rows.append((-score, -(unread > 0), ch, unread, who))
+        chans = [*self.core.store.channel_list("text"), *self.core.store.channel_list("voice"),
+                 *(self.core.channel(cid) for _, cid in self.core.dm_list())]
+        for ch in chans:
+            score = _fuzzy(text.strip(), ch["name"])
+            if score:
+                unread = self.core.unread(ch["id"])[0] if ch["kind"] != "voice" else 0
+                who = len(self.core.voice_members(ch["id"])) if ch["kind"] == "voice" else 0
+                rows.append((-score, -(unread > 0), ch, unread, who))
         rows.sort(key=lambda r: (r[0], r[1]))
         for _, _, ch, unread, who in rows:
             extra = (f"   ·   непрочитанных: {unread}" if unread else "") + \
-                    (f"   ·   в канале: {who}" if who else "")
-            item = QListWidgetItem(self.icons.icon("hash" if ch["kind"] == "text" else "volume",
-                                                   T.c["muted"], 18), ch["name"] + extra)
+                    (f"   ·   в канале: {who}" if who else "") + ("   ·   лично" if ch["kind"] == "dm" else "")
+            icon = {"text": "hash", "voice": "volume", "dm": "at"}[ch["kind"]]
+            item = QListWidgetItem(self.icons.icon(icon, T.c["muted"], 18), ch["name"] + extra)
             item.setData(Qt.UserRole, ch["id"])
             self.list.addItem(item)
         if self.list.count():
@@ -174,6 +175,33 @@ class QuickSwitcher(Dialog):
         if item:
             self.cid = item.data(Qt.UserRole)
             self.accept()
+
+
+def pick_member(parent, core):
+    """Who to write to: the room's members, online first. Returns a uid or None."""
+    from PySide6.QtWidgets import QListWidget, QListWidgetItem
+    d = Dialog(parent, "Написать лично", "Переписку видите только вы двое: сообщения идут напрямую "
+                                         "и хранятся только на ваших компьютерах.", width=420)
+    lst = QListWidget()
+    lst.setMinimumHeight(260)
+    from . import icons
+    for m in sorted(core.members(), key=lambda m: (not m["online"], m["name"].lower())):
+        if m["uid"] == core.me:
+            continue
+        item = QListWidgetItem(icons.icon("at", T.c["green"] if m["online"] else T.c["muted"], 18),
+                               m["name"] + ("" if m["online"] else "   ·   не в сети"))
+        item.setData(Qt.UserRole, m["uid"])
+        lst.addItem(item)
+    if not lst.count():
+        lst.addItem("В комнате пока никого — пригласите друга")
+    lst.setCurrentRow(0)
+    d.v.addWidget(lst)
+    ok = d.buttons("Написать")
+    lst.itemActivated.connect(lambda _: d.accept())
+    ok.setEnabled(any(lst.item(i).data(Qt.UserRole) for i in range(lst.count())))
+    if d.exec() == QDialog.Accepted and lst.currentItem():
+        return lst.currentItem().data(Qt.UserRole)
+    return None
 
 
 class ShortcutsHelp(Dialog):

@@ -37,6 +37,7 @@ ACTIONS = {
 # shortcuts bound inside the window (MainWindow) — listed in settings and the Ctrl+/ help
 IN_APP = [
     ("Ctrl+K", "Быстрый переход к каналу"),
+    ("Ctrl+F", "Поиск по сообщениям"),
     ("Alt+↑ / Alt+↓", "Предыдущий / следующий канал"),
     ("Alt+Shift+↑ / Alt+Shift+↓", "Предыдущий / следующий непрочитанный канал"),
     ("Ctrl+E", "Эмодзи"),

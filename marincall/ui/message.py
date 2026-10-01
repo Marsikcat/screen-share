@@ -5,7 +5,7 @@ import shutil
 import tempfile
 from pathlib import Path
 
-from PySide6.QtCore import QRectF, QSize, Qt, QUrl, Signal
+from PySide6.QtCore import QRectF, QSize, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QBrush, QColor, QDesktopServices, QPainter, QPalette, QPixmap
 from PySide6.QtWidgets import (QFileDialog, QFrame, QHBoxLayout, QLabel, QPlainTextEdit,
                                QToolButton, QVBoxLayout, QWidget)
@@ -110,6 +110,7 @@ class MessageWidget(QFrame):
     def __init__(self, core, msg, first):
         super().__init__()
         self.core, self.msg, self.first = core, msg, first
+        self.store = core.store_for(msg["ch"])       # the room's log or a conversation's
         self.editing = False
         self.time_lb = None
         self.setAutoFillBackground(True)
@@ -145,7 +146,18 @@ class MessageWidget(QFrame):
             item = self.col.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
-        store, msg, c = self.core.store, self.msg, T.c
+        store, msg, c = self.store, self.msg, T.c
+        if store.is_pinned(msg["id"]):
+            pin = QWidget()
+            ph = QHBoxLayout(pin)
+            ph.setContentsMargins(0, 0, 0, 0)
+            ph.setSpacing(4)
+            ic = QLabel()
+            ic.setPixmap(icons.pixmap("pin", c["muted"], 13))
+            ph.addWidget(ic)
+            ph.addWidget(QLabel(f"<span style='color:{c['muted']}; font-size:{T.px(8)}pt'>Закреплено</span>"))
+            ph.addStretch(1)
+            self.col.addWidget(pin)
         if msg.get("reply"):
             ref = store.msg_by_id.get(msg["reply"])
             text = (f"<b style='color:{readable(self.core.member(ref['author'])['color'])}'>"
@@ -264,7 +276,7 @@ class MessageWidget(QFrame):
 
     def _build_editor(self):
         box = EditBox()
-        box.setPlainText(self.core.store.text_of(self.msg))
+        box.setPlainText(self.store.text_of(self.msg))
         box.setFixedHeight(max(44, min(200, int(box.document().size().height() * 20) + 24)))
         box.save.connect(self._save_edit)
         box.cancel.connect(self._cancel_edit)
@@ -281,7 +293,7 @@ class MessageWidget(QFrame):
 
     def _save_edit(self, text):
         self.editing = False
-        if text.strip() and text.strip() != self.core.store.text_of(self.msg):
+        if text.strip() and text.strip() != self.store.text_of(self.msg):
             self.core.edit_message(self.msg["id"], text)
         self.refresh()
 
@@ -291,10 +303,23 @@ class MessageWidget(QFrame):
 
     # ── hover ───────────────────────────────────────────────────────
     _mention = False
+    _flash = False
+
+    def flash(self):
+        """Light up for a moment: this is the message you jumped to."""
+        self._flash = True
+        self._set_bg(False)
+        QTimer.singleShot(1600, self._unflash)
+
+    def _unflash(self):
+        self._flash = False
+        self._set_bg(False)
 
     def _set_bg(self, hover):
         pal = self.palette()
-        if self._mention:
+        if self._flash:
+            color = T.c["accent_soft"]
+        elif self._mention:
             color = mix(T.c["main"], T.c["yellow"], 0.16 if hover else 0.12)
         else:
             color = T.c["msg_hover"] if hover else T.c["main"]
