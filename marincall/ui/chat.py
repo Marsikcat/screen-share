@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (QFileDialog, QFrame, QHBoxLayout, QLabel, QPlainT
 from ..updater import parse_version
 from . import icons
 from .message import DateDivider, MessageWidget, day_title
+from .player import RecordBar, Recording
 from .richtext import QUICK_REACTIONS, EmojiPicker
 from .search import MessageCard
 from .theme import T
@@ -94,7 +95,7 @@ class HoverToolbar(QFrame):
 
     def _pick(self):
         target = self.target
-        picker = EmojiPicker(self.window())
+        picker = EmojiPicker(self.window(), self.view.core.s)
         picker.picked.connect(lambda e: target and self.view.core.toggle_reaction(target.msg["id"], e))
         picker.popup_at(self.more.mapToGlobal(QPoint(self.more.width(), 0)))
 
@@ -178,6 +179,8 @@ class MessageList(QScrollArea):
             self._add(m, prev, first_unread=i == first_unread)
             prev = m
         self._missed = 0
+        self._receipt = None
+        self.update_receipt()
         if keep_scroll:
             QTimer.singleShot(0, lambda: self.verticalScrollBar().setValue(old))
         elif fresh and self._divider is not None:
@@ -185,6 +188,27 @@ class MessageList(QScrollArea):
         else:
             self.scroll_bottom()
         QTimer.singleShot(100, self._update_jump)
+
+    def update_receipt(self):
+        """Conversations: «✓ Прочитано» under your newest message the other person has read."""
+        if getattr(self, "_receipt", None) is not None:
+            self._receipt.hide()
+            self._receipt.deleteLater()
+            self._receipt = None
+        if not (self.cid or "").startswith("dm:"):
+            return
+        seen = self.core.seen_by_peer(self.cid)
+        mine = [(m, w) for m, w in self.shown if m["author"] == self.core.me]
+        if not mine or mine[-1][0]["ts"] > seen:
+            return                                # your latest is not read yet
+        last = self.shown[-1][0]
+        if last["author"] != self.core.me:
+            return                                # they replied: obviously read
+        w = mine[-1][1]
+        lb = QLabel("✓ Прочитано")
+        lb.setStyleSheet(f"color: {T.c['muted']}; font-size: {T.px(8)}pt; padding: 0 0 2px 72px;")
+        self.col.insertWidget(self.col.indexOf(w) + 1, lb)
+        self._receipt = lb
 
     def _show_divider(self):
         """Open at the first unread message — unless all of them fit on the screen anyway."""
@@ -286,6 +310,7 @@ class MessageList(QScrollArea):
             self.set_channel(self.cid, keep_scroll=not stick)
         if stick:
             self.scroll_bottom()
+        self.update_receipt()
         self._update_jump()
 
     def widget_for(self, mid):
@@ -301,11 +326,21 @@ class MessageList(QScrollArea):
 
     def refresh_files(self, fid):
         stick = self.at_bottom()
+        store = self.core.store_for(self.cid) if self.cid else None
         for m, w in self.shown:
-            if any(f["id"] == fid for f in m["files"]):
+            if any(f["id"] == fid for f in m["files"]) or \
+                    (store and any(e["image"] == fid for e in store.embeds_of(m["id"]))):
                 w.refresh()
         if stick:                           # a picture arrived and pushed the chat up
             self.scroll_bottom()
+
+    def refresh_all_files(self):
+        from .message import _thumbs
+        _thumbs.clear()
+        store = self.core.store_for(self.cid) if self.cid else None
+        for m, w in self.shown:
+            if m["files"] or (store and store.embeds_of(m["id"])):
+                w.refresh()
 
     def reveal(self, mid):
         """Scroll to a message (loading older history if needed) and light it up."""
@@ -508,8 +543,22 @@ class Composer(QWidget):
         emoji.hover_bg = "transparent"
         emoji.clicked.connect(self.open_emoji)
         self.emoji_btn = emoji
+        mic = IconButton("mic", "Записать голосовое сообщение", 21, 36)
+        mic.hover_bg = "transparent"
+        mic.clicked.connect(self.start_recording)
+        self.record_bar = RecordBar()
+        self.record_bar.send.connect(self.finish_recording)
+        self.record_bar.cancel.connect(self.cancel_recording)
+        self.record_bar.hide()
+        self._rec = None
+        self._rec_timer = QTimer(self)
+        self._rec_timer.setInterval(100)
+        self._rec_timer.timeout.connect(self._rec_tick)
+        self._box_widgets = (attach, self.input, mic, emoji)
         h.addWidget(attach, 0, Qt.AlignBottom)
         h.addWidget(self.input, 1)
+        h.addWidget(self.record_bar, 1)
+        h.addWidget(mic, 0, Qt.AlignBottom)
         h.addWidget(emoji, 0, Qt.AlignBottom)
         lay.addWidget(box)
 
@@ -521,9 +570,89 @@ class Composer(QWidget):
     def set_placeholder(self, where):
         self.input.setPlaceholderText(f"Написать {where}" if where.startswith("@") else f"Написать в {where}")
 
+    _restoring = False
+
     def _typing(self):
-        if self.input.toPlainText().strip() and self.view.cid:
+        if self.input.toPlainText().strip() and self.view.cid and not self._restoring:
             self.core.send_typing(self.view.cid)
+
+    def swap_draft(self, old, new):
+        """Keep what you were writing in `old`, bring back what you left in `new`."""
+        drafts = self.core.s.setdefault("drafts", {})
+        text = self.input.toPlainText()
+        if old:
+            if text.strip():
+                drafts[old] = text[:4000]
+            else:
+                drafts.pop(old, None)
+        self._restoring = True
+        self.input.setPlainText(drafts.get(new, "") if new else "")
+        self._restoring = False
+        cur = self.input.textCursor()
+        cur.movePosition(cur.MoveOperation.End)
+        self.input.setTextCursor(cur)
+        self.core.s.save()
+
+    # ── voice messages ──────────────────────────────────────────────
+    def start_recording(self):
+        if self._rec or not self.view.cid:
+            return
+        rec = Recording(self.core.s)
+        err = rec.start()
+        if err:
+            self.window().toast(f"Микрофон недоступен: {err}", "error")
+            return
+        self._rec, self._rec_cid = rec, self.view.cid
+        rec.encoded.connect(self._recorded)
+        for w in self._box_widgets:
+            w.hide()
+        self.record_bar.show()
+        self.record_bar.setFocus()
+        self._rec_timer.start()
+
+    def _rec_tick(self):
+        if self._rec:
+            self.record_bar.show_state(self._rec.rec)
+            if self._rec.rec.full and self._rec.rec.stream is not None:
+                self._rec.rec.stream.stop()          # five minutes: wait for send / cancel
+
+    def _end_recording_ui(self):
+        self._rec_timer.stop()
+        self.record_bar.hide()
+        for w in self._box_widgets:
+            w.show()
+        self.input.setFocus()
+
+    def finish_recording(self):
+        rec, self._rec = self._rec, None
+        self._end_recording_ui()
+        if rec and not rec.finish():
+            self.window().toast("Слишком короткая запись", "error")
+        self._pending_rec = rec                      # keep it alive until it is encoded
+
+    def cancel_recording(self):
+        rec, self._rec = self._rec, None
+        if rec:
+            rec.cancel()
+        self._end_recording_ui()
+
+    def _recorded(self, result):
+        self._pending_rec = None
+        if isinstance(result, str):
+            self.window().toast(result, "error")
+            return
+        self.core.send_message(self._rec_cid, "", [str(result)], self.reply)
+        self.clear_reply()
+        import shutil
+        shutil.rmtree(result.parent, ignore_errors=True)
+
+    def keyPressEvent(self, e):
+        if self._rec and e.key() in (Qt.Key_Return, Qt.Key_Enter):
+            self.finish_recording()
+        elif self._rec and e.key() == Qt.Key_Escape:
+            self.cancel_recording()
+        else:
+            super().keyPressEvent(e)
 
     def _escape(self):
         if self.reply:
@@ -538,7 +667,7 @@ class Composer(QWidget):
 
     def open_emoji(self):
         anchor = self.emoji_btn
-        picker = EmojiPicker(self.window())
+        picker = EmojiPicker(self.window(), self.core.s)
         picker.picked.connect(lambda e: (self.input.insertPlainText(e), self.input.setFocus()))
         picker.popup_at(anchor.mapToGlobal(QPoint(anchor.width(), 0)))
 
@@ -590,6 +719,7 @@ class Composer(QWidget):
         if not text.strip() and not self.files:
             return
         self.core.send_message(self.view.cid, text, list(self.files), self.reply)
+        self.core.s.get("drafts", {}).pop(self.view.cid, None)
         self.input.clear()
         self.files = []
         self._render_files()
@@ -661,6 +791,8 @@ class ChatView(QWidget):
         core.message_removed.connect(self._on_removed)
         core.typing_changed.connect(self._on_typing)
         core.file_ready.connect(self.list.refresh_files)
+        core.cache_cleared.connect(self.list.refresh_all_files)
+        core.seen_changed.connect(self._on_seen)
         core.members_changed.connect(self._on_members)
 
     def set_channel(self, cid):
@@ -668,7 +800,7 @@ class ChatView(QWidget):
         if not ch:
             return
         changed = cid != self.cid
-        self.cid = cid
+        old, self.cid = self.cid, cid
         dm = ch["kind"] == "dm"
         self.h_icon.setPixmap(icons.pixmap("at" if dm else "hash", T.c["muted"], 22))
         self.h_name.setText(ch["name"])
@@ -682,6 +814,7 @@ class ChatView(QWidget):
         self.composer.set_placeholder(("@" if dm else "#") + ch["name"])
         if changed:
             self.composer.clear_reply()
+            self.composer.swap_draft(old, cid)
             self.list.unread_since = self.core.s["read"].get(cid, 0)
             self.list.set_channel(cid, fresh=True)
             self.composer.show_typing(self.core.typers(cid))
@@ -707,6 +840,13 @@ class ChatView(QWidget):
     def _on_removed(self, cid, mid):
         if cid == self.cid:
             self.list.set_channel(cid, keep_scroll=True)
+
+    def _on_seen(self, cid):
+        if cid == self.cid:
+            self.list.update_receipt()
+
+    def save_draft(self):
+        self.composer.swap_draft(self.cid, self.cid)
 
     def _on_typing(self, cid):
         if cid == self.cid:

@@ -81,6 +81,16 @@ PATHS = {
            '0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z"/>',
     "at": '<circle cx="12" cy="12" r="4"/><path d="M16 8v5a3 3 0 0 0 6 0v-1a10 10 0 1 0-4 8"/>',
 }
+PATHS.update({                    # FILL: these are painted solid, in the icon's colour
+    "play": '<path d="M7 4.8v14.4a1 1 0 0 0 1.5.86l11.6-7.2a1 1 0 0 0 0-1.72L8.5 3.94A1 1 0 0 0 7 4.8z" '
+            'fill="FILL"/>',
+    "pause": '<rect x="6" y="4" width="4" height="16" rx="1" fill="FILL"/>'
+             '<rect x="14" y="4" width="4" height="16" rx="1" fill="FILL"/>',
+    "music": '<path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/>',
+    "send": '<path d="M22 2 11 13"/><path d="m22 2-7 20-4-9-9-4z"/>',
+    "link": '<path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/>'
+            '<path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>',
+})
 PATHS["video"] = ('<path d="m16 13 5.22 3.48a.5.5 0 0 0 .78-.42V7.87a.5.5 0 0 0-.75-.43L16 10.5"/>'
                   '<rect x="2" y="6" width="14" height="12" rx="2"/>')
 PATHS["video_off"] = PATHS["video"] + SLASH
@@ -97,7 +107,7 @@ def pixmap(name, color, size=20, stroke=2.0):
     if pm is None:
         svg = (f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" '
                f'stroke="{color}" stroke-width="{stroke}" stroke-linecap="round" '
-               f'stroke-linejoin="round">{PATHS[name]}</svg>')
+               f'stroke-linejoin="round">{PATHS[name].replace("FILL", color)}</svg>')
         renderer = QSvgRenderer(QByteArray(svg.encode()))
         pm = QPixmap(int(size * dpr), int(size * dpr))
         pm.fill(Qt.transparent)

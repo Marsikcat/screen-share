@@ -10,6 +10,7 @@ from PySide6.QtGui import QBrush, QColor, QDesktopServices, QPainter, QPalette, 
 from PySide6.QtWidgets import (QFileDialog, QFrame, QHBoxLayout, QLabel, QPlainTextEdit,
                                QToolButton, QVBoxLayout, QWidget)
 
+from ..audio import files_label
 from . import icons, richtext
 from .theme import T, mix
 from .widgets import Avatar, FlowLayout, IconButton, human_size
@@ -111,6 +112,7 @@ class MessageWidget(QFrame):
         super().__init__()
         self.core, self.msg, self.first = core, msg, first
         self.store = core.store_for(msg["ch"])       # the room's log or a conversation's
+        self.revealed = set()                       # ||spoilers|| clicked open
         self.editing = False
         self.time_lb = None
         self.setAutoFillBackground(True)
@@ -162,7 +164,7 @@ class MessageWidget(QFrame):
             ref = store.msg_by_id.get(msg["reply"])
             text = (f"<b style='color:{readable(self.core.member(ref['author'])['color'])}'>"
                     f"@{self.core.name_of(ref['author'])}</b>&nbsp; "
-                    f"{richtext.html.escape(richtext.plain_preview(store.text_of(ref)))}"
+                    f"{richtext.html.escape(richtext.plain_preview(store.text_of(ref)) or files_label(ref['files']))}"
                     if ref and ref["id"] not in store.deleted else "<i>Исходное сообщение удалено</i>")
             rb = QLabel(f"<span style='color:{c['muted']}'>↱&nbsp;</span>{text}")
             rb.setStyleSheet(f"color: {c['muted']}; font-size: {T.px(9)}pt;")
@@ -182,14 +184,15 @@ class MessageWidget(QFrame):
             text = store.text_of(msg)
             if text:
                 jumbo = richtext.is_jumbo(text)
-                html = richtext.render(text, self.core.s["name"])
+                html = richtext.render(text, self.core.s["name"], self.revealed)
                 if store.is_edited(msg):
                     html += (f"<span style='color:{c['muted']}; font-size:{T.px(7)}pt'>"
                              f"&nbsp;(изменено)</span>")
                 lb = QLabel(html)
                 lb.setWordWrap(True)
                 lb.setTextFormat(Qt.RichText)
-                lb.setOpenExternalLinks(True)
+                lb.setOpenExternalLinks(False)
+                lb.linkActivated.connect(self._link)
                 lb.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.LinksAccessibleByMouse)
                 lb.setStyleSheet(f"color: {c['text']};" + (f"font-size: {T.px(28)}pt;" if jumbo else ""))
                 if self.core.mentions_me(text) and msg["author"] != self.core.me:
@@ -198,6 +201,11 @@ class MessageWidget(QFrame):
                 self.col.addWidget(lb)
         for meta in msg["files"]:
             self.col.addWidget(self._attachment(meta))
+        if not self.editing:
+            text = store.text_of(msg)
+            for card in store.embeds_of(msg["id"]):
+                if card["url"] in text:                  # an edit may have removed the link
+                    self.col.addWidget(self._embed(card))
         reactions = store.reactions_of(msg["id"])
         if reactions:
             box = QWidget()
@@ -205,6 +213,84 @@ class MessageWidget(QFrame):
             for emoji, users in reactions.items():
                 flow.addWidget(self._reaction_chip(emoji, users))
             self.col.addWidget(box)
+
+    def _link(self, url):
+        if url.startswith("spoiler:"):
+            self.revealed.add(int(url.split(":", 1)[1]))
+            self.refresh()
+        else:
+            QDesktopServices.openUrl(QUrl(url))
+
+    def _embed_picture(self, card, box):
+        fid = card["image"]
+        if not fid:
+            return None
+        path = self.core.file_path(fid)
+        if not path:
+            self.core.request_file(fid, prefer=self.msg["author"], only=self.core.dm_peer.get(self.msg["ch"]))
+            return None
+        key = ("embed", fid, box)
+        pm = _thumbs.get(key)
+        if pm is None:
+            src = QPixmap(str(path))
+            if src.isNull():
+                return None
+            if src.width() > box[0] or src.height() > box[1]:
+                src = src.scaled(QSize(*box), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            pm = _thumbs[key] = rounded(src, 6)
+        lb = QLabel()
+        lb.setPixmap(pm)
+        lb.setCursor(Qt.PointingHandCursor)
+        lb.setToolTip(card["url"])
+        lb.mousePressEvent = lambda e: QDesktopServices.openUrl(QUrl(card["url"]))
+        return lb
+
+    def _embed(self, card):
+        """A link card: site, title (a link), description, the page's picture."""
+        c = T.c
+        if not card["title"]:                       # a direct link to a picture: just the picture
+            pic = self._embed_picture(card, (420, 320))
+            wrap = QWidget()
+            h = QHBoxLayout(wrap)
+            h.setContentsMargins(0, 4, 0, 4)
+            if pic:
+                h.addWidget(pic)
+            h.addStretch(1)
+            return wrap
+        f = QFrame()
+        f.setObjectName("Embed")
+        f.setStyleSheet(f"QFrame#Embed {{ background: {c['side']}; border-left: 4px solid {c['accent']};"
+                        f"border-radius: 4px; }} QLabel {{ background: transparent; border: none; }}")
+        f.setMaximumWidth(T.px(440))
+        v = QVBoxLayout(f)
+        v.setContentsMargins(12, 8, 14, 12)
+        v.setSpacing(4)
+        esc = richtext.html.escape
+        if card["site"]:
+            site = QLabel(esc(card["site"]))
+            site.setStyleSheet(f"color: {c['muted']}; font-size: {T.px(8)}pt;")
+            v.addWidget(site)
+        title = QLabel(f"<a href='{esc(card['url'], quote=True)}' style='color:{c['link']};"
+                       f"text-decoration:none; font-weight:600'>{esc(card['title'])}</a>")
+        title.setWordWrap(True)
+        title.setTextFormat(Qt.RichText)
+        title.linkActivated.connect(lambda url: QDesktopServices.openUrl(QUrl(url)))
+        v.addWidget(title)
+        if card["desc"]:
+            desc = QLabel(esc(card["desc"]))
+            desc.setWordWrap(True)
+            desc.setStyleSheet(f"color: {c['text']}; font-size: {T.px(9)}pt;")
+            v.addWidget(desc)
+        pic = self._embed_picture(card, (400, 225))
+        if pic:
+            v.addSpacing(4)
+            v.addWidget(pic)
+        wrap = QWidget()
+        h = QHBoxLayout(wrap)
+        h.setContentsMargins(0, 4, 0, 4)
+        h.addWidget(f)
+        h.addStretch(1)
+        return wrap
 
     def _reaction_chip(self, emoji, users):
         c = T.c
@@ -224,6 +310,17 @@ class MessageWidget(QFrame):
     def _attachment(self, meta):
         c = T.c
         path = self.core.file_path(meta["id"])
+        if not path:                # not here yet, or the cache was cleared: ask the room for it
+            self.core.request_file(meta["id"], prefer=self.msg["author"],
+                                   only=self.core.dm_peer.get(self.msg["ch"]))
+        if meta["type"].startswith("audio/") and path:
+            from .player import AudioCard
+            wrap = QWidget()
+            h = QHBoxLayout(wrap)
+            h.setContentsMargins(0, 4, 0, 4)
+            h.addWidget(AudioCard(self.core, meta, path, open_file))
+            h.addStretch(1)
+            return wrap
         if meta["type"].startswith("image/") and path:
             pm = _thumbs.get(meta["id"])
             if pm is None:

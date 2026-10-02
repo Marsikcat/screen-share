@@ -149,6 +149,8 @@ class VoiceEngine(QObject):
         self._sbuf_len = 0
         self._sbuf_playing = False
         self._slock = threading.Lock()
+        self._clips = {}             # key -> [mono float32, position, gain, from the call]
+        self._clock = threading.Lock()
 
     # ── lifecycle ───────────────────────────────────────────────────
     def start(self):
@@ -253,6 +255,34 @@ class VoiceEngine(QObject):
     def play(self, name):
         if self.s["sounds"] and name in EFFECTS:
             self._fx.append([EFFECTS[name], 0])
+
+    # ── clips: voice messages and the soundboard ────────────────────
+    def play_clip(self, key, samples, gain=1.0, start=0, call=False):
+        """Mono float32 48 kHz through the speakers (and the echo reference).
+        call=True: a soundboard sound from the call — silent while deafened."""
+        with self._clock:
+            self._clips[key] = [samples, max(0, int(start)), float(gain), call]
+
+    def stop_clip(self, key):
+        with self._clock:
+            self._clips.pop(key, None)
+
+    def clip_pos(self, key):
+        """Samples played so far, None once it has finished or was stopped."""
+        clip = self._clips.get(key)
+        return clip[1] if clip else None
+
+    def _mix_clips(self, mix, frames):
+        vol = self.s["output_volume"] / 100.0
+        with self._clock:
+            for key, clip in list(self._clips.items()):
+                arr, pos, gain, call = clip
+                piece = arr[pos:pos + frames]
+                if len(piece) and not (call and self.s["deafened"]):
+                    mix[:len(piece)] += piece * (gain * vol)
+                clip[1] = pos + frames
+                if clip[1] >= len(arr):
+                    del self._clips[key]
 
     # ── the sound of a screen share we watch ────────────────────────
     def push_stream_audio(self, chunk):
@@ -424,6 +454,8 @@ class VoiceEngine(QObject):
             fx[1] += frames
             if fx[1] >= len(arr):
                 self._fx.remove(fx)
+        if self._clips:
+            self._mix_clips(mix, frames)
         if self.in_stream is not None and self._apm is not None:
             # echo reference: everything the speakers play except our own mic-test loopback
             far = mix if share is None else mix + share.mean(axis=1)

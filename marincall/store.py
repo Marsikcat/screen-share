@@ -30,7 +30,9 @@ FILE_ID_RE = re.compile(r"^[0-9a-f]{32}$")
 # messages in user-created channels.
 ID_LIMIT = 96
 KINDS = {"msg", "edit", "del", "react", "ch_new", "ch_ren", "ch_del", "profile", "room", "avatar",
-         "pin"}
+         "pin", "embed", "sound"}
+FUTURE_KIND_RE = re.compile(r"^[a-z_]{1,16}$")
+FUTURE_LIMIT = 8192             # bytes: an event of a kind from a newer version, kept as it is
 
 # Fixed ids so every peer has the same starter channels without coordination.
 DEFAULT_CHANNELS = [
@@ -69,10 +71,22 @@ def validate(ev, legacy=False, need_sig=True):
     if not isinstance(ev, dict):
         return None
     a, s, k = str(ev.get("a", "")), ev.get("s"), ev.get("k")
-    if not (LEGACY_UID_RE if legacy else UID_RE).match(a) or not isinstance(s, int) or s < 1             or k not in KINDS:
+    if not (LEGACY_UID_RE if legacy else UID_RE).match(a) or not isinstance(s, int) or s < 1:
         return None
     if ev.get("id") != f"{a}:{s}" or not isinstance(ev.get("ts"), int):
         return None
+    if k not in KINDS:
+        # a kind from a newer version: keep it and pass it on unchanged, so its author's log
+        # has no gap here (3.5 and older dropped them and re-asked for them on every connect)
+        if legacy or not isinstance(k, str) or not FUTURE_KIND_RE.match(k) or not need_sig \
+                or not SIG_RE.match(str(ev.get("sig", ""))):
+            return None
+        try:
+            if len(json.dumps(ev, ensure_ascii=False)) > FUTURE_LIMIT:
+                return None
+        except (TypeError, ValueError):
+            return None
+        return dict(ev)
     out = {"id": ev["id"], "a": a, "s": s, "k": k, "ts": ev["ts"]}
     if not legacy and need_sig:
         if not SIG_RE.match(str(ev.get("sig", ""))):
@@ -121,6 +135,29 @@ def validate(ev, legacy=False, need_sig=True):
         if fid and not FILE_ID_RE.match(fid):
             return None
         out["file"] = fid
+    elif k == "embed":           # a link preview, made by the message's author
+        out["target"] = clean(ev.get("target"), ID_LIMIT)
+        out["url"] = clean(ev.get("url"), 500)
+        out["title"] = clean(ev.get("title"), 200)
+        out["desc"] = clean(ev.get("desc"), 300)
+        out["site"] = clean(ev.get("site"), 60)
+        fid = str(ev.get("image") or "")
+        if fid and not FILE_ID_RE.match(fid):
+            return None
+        out["image"] = fid
+        if not out["target"] or not out["url"].startswith(("http://", "https://")) \
+                or not (out["title"] or fid):
+            return None
+    elif k == "sound":           # the soundboard: add a sound (file), or remove one (target)
+        fid = str(ev.get("file") or "")
+        if fid and not FILE_ID_RE.match(fid):
+            return None
+        out["file"] = fid
+        out["name"] = clean(ev.get("name"), 32)
+        out["emoji"] = clean(ev.get("emoji"), 16)
+        out["target"] = clean(ev.get("target"), ID_LIMIT)
+        if not ((fid and out["name"]) or out["target"]):
+            return None
     return out
 
 
@@ -142,6 +179,9 @@ class Store:
         self.pins = {}              # msg id -> (ts, event id, pinned, by whom) — last one wins
         self.profiles = {}          # uid -> {name, color, _v}
         self.avatars = {}           # uid -> (ts, event id, file id or "")
+        self.embeds = {}            # msg id -> {url: (ts, event id, card)}
+        self.sounds = {}            # sound id (its event id) -> {id, name, emoji, file, by, ts}
+        self._sounds_removed = set()
         self.room_name = (0, "", "")
         for i, (cid, kind, name, topic) in enumerate(DEFAULT_CHANNELS):
             self.channels[cid] = {"id": cid, "kind": kind, "name": name, "topic": topic,
@@ -262,6 +302,19 @@ class Store:
             cur = self.pins.get(ev["target"])
             if cur is None or v > cur[:2]:
                 self.pins[ev["target"]] = (*v, ev["on"], ev["a"])
+        elif k == "embed":
+            if author_of(ev["target"]) == ev["a"]:
+                per = self.embeds.setdefault(ev["target"], {})
+                cur = per.get(ev["url"])
+                if cur is None or v > cur[:2]:
+                    per[ev["url"]] = (*v, {key: ev[key] for key in ("url", "title", "desc", "site", "image")})
+        elif k == "sound":               # anyone may add or remove one, like pins
+            if ev["target"]:
+                self._sounds_removed.add(ev["target"])
+                self.sounds.pop(ev["target"], None)
+            elif ev["id"] not in self._sounds_removed:
+                self.sounds[ev["id"]] = {"id": ev["id"], "name": ev["name"], "emoji": ev["emoji"] or "🔊",
+                                         "file": ev["file"], "by": ev["a"], "ts": ev["ts"]}
 
     # ── queries ─────────────────────────────────────────────────────
     @staticmethod
@@ -293,6 +346,16 @@ class Store:
             if on:
                 out[emoji] = on
         return out
+
+    def embeds_of(self, mid):
+        """Link cards of a message, in the order they were made."""
+        return [e[2] for e in sorted(self.embeds.get(mid, {}).values(), key=lambda e: e[:2])]
+
+    def sound_list(self):
+        return sorted(self.sounds.values(), key=lambda x: (x["ts"], x["id"]))
+
+    def sound_files(self):
+        return {x["file"] for x in list(self.sounds.values())}
 
     def is_pinned(self, mid):
         pin = self.pins.get(mid)

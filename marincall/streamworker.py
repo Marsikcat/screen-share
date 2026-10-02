@@ -168,9 +168,12 @@ class Worker:
             sent += samples_s16.size // 2
             self._mux(self.audio.encode(frame))
 
-        if audio == "system":
+        if audio in ("system", "app"):
             from .loopback import LoopbackCapture
-            cap = LoopbackCapture(self.cfg["parent_pid"])  # MarinCall's whole process tree is left out
+            if audio == "app":                  # the shared window's program, and nothing else
+                cap = LoopbackCapture(self.cfg["source"]["pid"], include=True)
+            else:                               # MarinCall's whole process tree is left out
+                cap = LoopbackCapture(self.cfg["parent_pid"])
             try:
                 cap.open()
             except OSError as e:

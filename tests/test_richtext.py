@@ -51,3 +51,27 @@ def test_jumbo_emoji():
     assert richtext.is_jumbo("🔥🎮")
     assert not richtext.is_jumbo("🔥 ок")
     assert not richtext.is_jumbo("")
+
+
+def test_spoilers_hide_until_clicked():
+    out = richtext.render("ответ: ||Дарт Вейдер — отец||")
+    assert 'href="spoiler:0"' in out
+    shown = richtext.render("ответ: ||Дарт Вейдер — отец||", revealed={0})
+    assert "spoiler:0" not in shown and "Дарт Вейдер" in shown
+    assert richtext.plain_preview("кто? ||он||") == "кто? ▒▒▒"
+    assert richtext.hide_spoilers("||a|| и ||b||") == "▒▒▒ и ▒▒▒"
+
+
+def test_lists_and_headings():
+    out = richtext.render("# План\n- первое\n* второе\n1. раз\n2) два")
+    assert "font-weight:700" in out and "План" in out
+    assert out.count("•") == 2 and "1." in out and "2)" in out
+    assert "# План" not in richtext.plain_preview("# План")
+
+
+def test_emoji_search():
+    assert richtext.emoji_matches("🔥", "огонь")
+    assert richtext.emoji_matches("😂", "сме")               # word start
+    assert richtext.emoji_matches("🔥", "fire")              # Unicode name
+    assert not richtext.emoji_matches("🔥", "кот")
+    assert richtext.emoji_matches("🐱", "")

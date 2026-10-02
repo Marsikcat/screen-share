@@ -70,9 +70,16 @@ Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: 
 
 [Run]
 Filename: "{app}\{#AppExe}"; Description: "{cm:LaunchProgram,{#AppName}}"; Flags: nowait postinstall skipifsilent
-; silent run = in-app update: start the new version right away
-Filename: "{app}\{#AppExe}"; Flags: nowait; Check: WizardSilent
+; silent run = in-app update: start the new version right away — unless the update was
+; installed on exit (/NORELAUNCH=1): you closed MarinCall, it should stay closed
+Filename: "{app}\{#AppExe}"; Flags: nowait; Check: Relaunch
 
 [UninstallRun]
 Filename: "{sys}\taskkill.exe"; Parameters: "/f /im {#AppExe}"; Flags: runhidden; RunOnceId: "StopApp"
 Filename: "{sys}\taskkill.exe"; Parameters: "/f /im ScreenShare.exe"; Flags: runhidden; RunOnceId: "StopClassic"
+
+[Code]
+function Relaunch: Boolean;
+begin
+  Result := WizardSilent and (ExpandConstant('{param:NORELAUNCH|0}') <> '1');
+end;

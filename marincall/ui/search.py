@@ -7,6 +7,7 @@ from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (QButtonGroup, QFrame, QHBoxLayout, QLabel, QLineEdit, QScrollArea,
                                QToolButton, QVBoxLayout, QWidget)
 
+from .. import audio
 from . import icons
 from .message import readable, when
 from .theme import T, mix
@@ -15,6 +16,7 @@ from .widgets import Avatar, IconButton, label
 
 def _snippet(text, words, width=150):
     """A piece of the text around the first match, the matches marked."""
+    text = re.sub(r"\|\|(.+?)\|\|", "▒▒▒", text, flags=re.S)                 # spoilers stay hidden
     plain = " ".join(re.sub(r"```[\w+-]*|[*_~`>|]", " ", text).split())   # code stays searchable
     low = plain.casefold()
     first = min((low.find(w) for w in words if low.find(w) >= 0), default=0)
@@ -73,8 +75,11 @@ class MessageCard(QFrame):
             body.setTextFormat(Qt.RichText)
             body.setStyleSheet(f"color: {c['text']};")
             v.addWidget(body)
-        for f in msg["files"][:3]:
-            v.addWidget(label(f"📎 {f['name']}", "hint"))
+        if any(audio.is_voice(f) for f in msg["files"]):
+            v.addWidget(label(audio.files_label(msg["files"]), "hint"))
+        else:
+            for f in msg["files"][:3]:
+                v.addWidget(label(f"📎 {f['name']}", "hint"))
 
     def mouseReleaseEvent(self, e):
         if e.button() == Qt.LeftButton:

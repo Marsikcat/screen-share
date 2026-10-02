@@ -29,6 +29,7 @@ S_OK = 0
 E_NOINTERFACE = -2147467262      # 0x80004002
 VT_BLOB = 65
 AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK = 1
+PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE = 0
 PROCESS_LOOPBACK_MODE_EXCLUDE_TARGET_PROCESS_TREE = 1
 AUDCLNT_SHAREMODE_SHARED = 0
 AUDCLNT_STREAMFLAGS_LOOPBACK = 0x00020000
@@ -139,8 +140,11 @@ class _CompletionHandler:
 class LoopbackCapture:
     """open() in the thread that will read; then read() blocks until audio is due."""
 
-    def __init__(self, exclude_pid=None):
-        self.exclude_pid = exclude_pid or os.getpid()
+    def __init__(self, pid=None, include=False):
+        """include=False: everything except `pid`'s process tree (MarinCall itself);
+        include=True: only that program (the window being shared) and its child processes."""
+        self.pid = pid or os.getpid()
+        self.include = include
         self._client = self._capture = self._op = None
         self._event = None
         self._pending = bytearray()
@@ -152,8 +156,9 @@ class LoopbackCapture:
         """Raises OSError when process loopback is unavailable (older Windows)."""
         ctypes.windll.ole32.CoInitializeEx(None, 0)          # multithreaded apartment
         params = ACTIVATION_PARAMS(AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK,
-                                   PROCESS_LOOPBACK_PARAMS(self.exclude_pid,
-                                                           PROCESS_LOOPBACK_MODE_EXCLUDE_TARGET_PROCESS_TREE))
+                                   PROCESS_LOOPBACK_PARAMS(
+                                       self.pid, PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE if self.include
+                                       else PROCESS_LOOPBACK_MODE_EXCLUDE_TARGET_PROCESS_TREE))
         self._params = params
         var = PROPVARIANT(vt=VT_BLOB, blob=BLOB(ctypes.sizeof(params),
                                                 ctypes.cast(ctypes.pointer(params), ctypes.c_void_p)))

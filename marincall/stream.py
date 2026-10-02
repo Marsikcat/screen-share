@@ -33,6 +33,7 @@ from . import loopback
 from .config import FROZEN, ROOT
 
 SYSTEM_AUDIO = "system"         # stream_audio value: process loopback without our own sounds
+APP_AUDIO = "app"               # …only the program whose window is shared
 CAMERA = {"h": 360, "fps": 30, "kbps": 800}      # a webcam in a voice channel
 TEST_CAMERA = "__test__"        # camera_device for tools/screens.py: a test pattern, no hardware
 
@@ -182,7 +183,9 @@ def list_windows(exclude_titles=()):
                 user32.GetWindowTextW(hwnd, buf, n + 1)
                 title = buf.value.strip()
                 if title and title not in exclude_titles and title != "Program Manager":
-                    wins.append({"kind": "window", "title": title, "label": title})
+                    pid = wt.DWORD()
+                    user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+                    wins.append({"kind": "window", "title": title, "label": title, "pid": pid.value})
         return True
 
     user32.EnumWindows(proto(cb), 0)
@@ -259,6 +262,7 @@ def audio_choices():
     out = []
     if loopback.available():
         out.append(("Звук компьютера — без голосового чата", SYSTEM_AUDIO))
+        out.append(("Только звук показываемой программы (для окна)", APP_AUDIO))
     out.append(("Без звука", ""))
     out += [(f"Устройство: {name}", name) for name in list_audio_devices()]
     return out
@@ -329,7 +333,9 @@ class StreamSender(QObject):
         self.stop()
         q = quality if isinstance(quality, dict) else QUALITY.get(quality, QUALITY["1080p60"])
         nvenc = encoder == "nvenc" or (encoder == "auto" and has_nvenc())
-        if audio == SYSTEM_AUDIO and not loopback.available():
+        if audio == APP_AUDIO and not source.get("pid"):
+            audio = SYSTEM_AUDIO                 # a whole screen: there is no single program to pick
+        if audio in (SYSTEM_AUDIO, APP_AUDIO) and not loopback.available():
             self.warning.emit("Звук компьютера без голосового чата есть только в Windows 10 2004 и новее "
                               "— трансляция без звука")
             audio = ""

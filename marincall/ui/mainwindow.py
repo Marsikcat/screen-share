@@ -10,7 +10,7 @@ from PySide6.QtWidgets import (QApplication, QFrame, QHBoxLayout, QLabel, QLineE
 
 from .. import updater
 from ..hotkeys import HotkeyManager
-from ..config import APP_NAME, ROOT
+from ..config import APP_NAME, FROZEN, ROOT
 from ..system import classic_command
 from . import dialogs, icons, theme
 from .chat import ChatView
@@ -95,6 +95,9 @@ class MainWindow(QMainWindow):
 
         if self.s["check_updates"]:
             QTimer.singleShot(4000, self._check_updates)
+            # it often lives in the tray for days: look again every 6 hours
+            self._update_timer = QTimer(self, interval=6 * 3600 * 1000, timeout=self._check_updates)
+            self._update_timer.start()
         if not start_hidden:
             self.show()
             theme.style_window(self)
@@ -123,8 +126,9 @@ class MainWindow(QMainWindow):
         self.banner_text.setStyleSheet("font-weight: 600;")
         b.addStretch(1)
         b.addWidget(self.banner_text)
-        go = button("Что нового", "secondary", lambda: self.open_settings("updates"))
+        go = button("Что нового", "secondary", self._banner_clicked)
         go.setStyleSheet("padding: 3px 12px;")
+        self.banner_go = go
         b.addWidget(go)
         b.addStretch(1)
         self.banner.hide()
@@ -521,8 +525,11 @@ class MainWindow(QMainWindow):
                                       "Выйти можно через меню значка.", app_icon(), 4000)
             return
         self.s["window"] = bytes(self.saveGeometry().toBase64()).decode()
+        self.chat.save_draft()
         self.s.save()
         self.core.shutdown()
+        if not getattr(self, "_restarting", False) and self.s.get("auto_update", True):
+            updater.install_on_exit()            # a downloaded update goes in now, quietly
         if self.tray:
             self.tray.hide()
         e.accept()
@@ -534,15 +541,40 @@ class MainWindow(QMainWindow):
 
     def restart(self):
         self.quitting = True
+        self._restarting = True
         self.close()
         updater.restart()
 
     def _check_updates(self):
+        if updater.downloaded():
+            return                               # already waiting for the app to close
+
+        def downloaded(version):
+            if isinstance(version, Exception):
+                self._announce_update(self._update_info["latest"])     # couldn't fetch: just tell
+                return
+            self.banner_text.setText(f"MarinCall {version} скачан — установится, когда вы закроете приложение")
+            self.banner_go.setText("Установить сейчас")
+            self.banner.show()
+
         def done(res):
-            if isinstance(res, dict) and res.get("available"):
-                self.banner_text.setText(f"Вышла новая версия MarinCall {res['latest']}")
-                self.banner.show()
-                if self.tray and not self.isVisible():
-                    self.tray.showMessage(APP_NAME, f"Доступна новая версия {res['latest']}",
-                                          app_icon(), 5000)
+            if not (isinstance(res, dict) and res.get("available")):
+                return
+            self._update_info = res
+            if FROZEN and self.s.get("auto_update", True):
+                self._download_bridge = run_async(lambda: updater.apply(res), downloaded)
+            else:
+                self._announce_update(res["latest"])
         self._update_bridge = run_async(updater.check, done)
+
+    def _announce_update(self, version):
+        self.banner_text.setText(f"Вышла новая версия MarinCall {version}")
+        self.banner.show()
+        if self.tray and not self.isVisible():
+            self.tray.showMessage(APP_NAME, f"Доступна новая версия {version}", app_icon(), 5000)
+
+    def _banner_clicked(self):
+        if updater.downloaded():
+            self.restart()                       # installs and starts the new version
+        else:
+            self.open_settings("updates")

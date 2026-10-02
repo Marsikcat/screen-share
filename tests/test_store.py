@@ -141,3 +141,53 @@ def test_search(tmp_path):
     assert {m["ch"] for m in st.search("суббот")} == {"d:text:general", "d:text:media"}   # files too
     assert [m["ch"] for m in st.search("суббот", cid="d:text:media")] == ["d:text:media"]
     assert st.search("   ") == []
+
+
+def test_link_cards_only_from_the_author(tmp_path):
+    a, _ = make_store(tmp_path / "a")
+    b, _ = make_store(tmp_path / "b")
+    m = a.create("msg", ch="d:text:general", text="https://example.com", reply=None, files=[])
+    b.add(m)
+    card = dict(url="https://example.com", title="Example", desc="", site="example.com", image="")
+    a.create("embed", target=m["id"], **card)
+    b.add(a.events[f"{a.me}:2"])
+    fake = b.create("embed", target=m["id"], **{**card, "url": "https://evil.example", "title": "!"})
+    a.add(fake)                                     # someone else cannot put a card under my message
+    assert a.embeds_of(m["id"]) == b.embeds_of(m["id"])[:1] == [card]
+    a.create("embed", target=m["id"], **{**card, "title": "Example Domain"})   # newer one wins
+    assert [e["title"] for e in a.embeds_of(m["id"])] == ["Example Domain"]
+
+
+def test_soundboard_sounds(tmp_path):
+    a, _ = make_store(tmp_path / "a")
+    b, _ = make_store(tmp_path / "b")
+    s1 = a.create("sound", file="c" * 32, name="Мяу", emoji="🐱", target="")
+    b.add(s1)
+    assert [x["name"] for x in b.sound_list()] == ["Мяу"] and b.sound_files() == {"c" * 32}
+    a.add(b.create("sound", file="", name="", emoji="", target=s1["id"]))   # anyone may remove one
+    assert a.sound_list() == []
+    assert validate({"id": f"{a.me}:9", "a": a.me, "s": 9, "ts": 1, "k": "sound", "file": "../x",
+                     "name": "x"}, need_sig=False) is None
+
+
+def test_kinds_from_newer_versions_are_kept_and_passed_on(tmp_path):
+    # 3.5 and older dropped them: the author's log had a hole, and everything after it was
+    # sent again on every connect
+    from marincall.store import canonical
+    a, key = make_store(tmp_path / "a")
+    b, _ = make_store(tmp_path / "b")
+    ev = {"id": f"{a.me}:1", "a": a.me, "s": 1, "k": "poll", "ts": 5, "question": "Во сколько?",
+          "options": ["19:00", "20:00"]}
+    ev["sig"] = key.sign(canonical(ev)).to_bytes().hex()
+    m = a.create("msg", ch="d:text:general", text="после", reply=None, files=[])
+    assert m["s"] == 1                                   # a never saw the poll itself
+    c, _ = make_store(tmp_path / "c")
+    assert c.add(ev) == ev                                # kept as it is, signature and all
+    assert c.add({**ev, "question": "подделка"}) is None
+    assert c.vector() == {a.me: 1} and c.missing_for({}) == [ev]
+    again, _ = make_store(tmp_path / "c")                 # survives a restart
+    assert again.events[ev["id"]] == ev
+    huge = {**ev, "id": f"{a.me}:2", "s": 2, "blob": "x" * 9000}
+    huge["sig"] = key.sign(canonical(huge)).to_bytes().hex()
+    assert c.add(huge) is None
+    assert b.vector() == {}

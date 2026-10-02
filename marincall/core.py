@@ -6,6 +6,7 @@ import mimetypes
 import re
 import secrets
 import shutil
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -13,6 +14,8 @@ from pathlib import Path
 import iroh
 from PySide6.QtCore import QObject, QTimer, Signal
 
+from . import audio, linkpreview
+from .audio import files_label
 from .config import FILES_DIR, MAX_FILE, VERSION
 from .net import CAMERA_MAGIC, Mesh, make_invite, parse_invite
 from .store import UID_RE, Store, author_of, text_channel_name
@@ -36,9 +39,14 @@ class Core(QObject):
     speaking_changed = Signal(str, bool)
     typing_changed = Signal(str)
     file_ready = Signal(str)
+    cache_cleared = Signal()
     room_changed = Signal()
     read_changed = Signal()
+    seen_changed = Signal(str)              # a conversation: the other person read further
     stream_changed = Signal()
+    sounds_changed = Signal()               # the room's soundboard list
+    sound_played = Signal(str, str)         # who, what («🥁 Ба-дум-тсс»)
+    _embed_ready = Signal(str, dict)        # message id, link card (from the fetch thread)
     toast = Signal(str, str)                # text, kind: info | error
     notify = Signal(str, str, str)          # title, body, channel id
 
@@ -91,6 +99,11 @@ class Core(QObject):
         self.cameras = CameraHub(self.mesh)
         self.cam_watchers = set()   # peers receiving my camera
         self._cam_subs = set()      # peers whose camera I receive
+
+        self._sb_pcm = {}           # custom sound file id -> samples
+        self._sb_recent = {}        # uid -> times of their last soundboard sounds (rate limit)
+        self._sb_slot = 0
+        self._embed_ready.connect(self._publish_embed)
 
         self._timer = QTimer(self, interval=1000, timeout=self._tick)
 
@@ -279,7 +292,7 @@ class Core(QObject):
         """Only the two of us write into our conversation, and only into it."""
         if not isinstance(ev, dict) or ev.get("a") not in (self.me, uid):
             return False
-        if ev.get("k") not in ("msg", "edit", "del", "react", "pin"):
+        if ev.get("k") not in ("msg", "edit", "del", "react", "pin", "embed"):
             return False
         return ev.get("k") != "msg" or ev.get("ch") == self.dm_cid(uid)
 
@@ -375,6 +388,8 @@ class Core(QObject):
         for fid in list(self.wanted):
             self.request_file(fid)
         self._send_dm_vector(uid, ask=True)
+        if uid in self.dms:
+            self._send_seen(self.dm_cid(uid))
         self.members_changed.emit()
 
     def _on_peer_down(self, uid):
@@ -423,6 +438,13 @@ class Core(QObject):
                 self.mesh.broadcast({"t": "ev", "e": fresh}, exclude=uid)  # gossip onwards
                 for ev in fresh:
                     self._on_event(ev, live=len(msg["e"]) < 5)
+        elif t == "dm_read":
+            cid = str(msg.get("ch", ""))
+            ts = msg.get("ts")
+            if self.dm_peer.get(cid) == uid and isinstance(ts, int) and ts > self.seen_by_peer(cid):
+                self.s.setdefault("dm_seen", {})[cid] = ts
+                self.s.save()
+                self.seen_changed.emit(cid)
         elif t == "dm_vv" and isinstance(msg.get("v"), dict):
             # they have something for us (or we for them): open the conversation on our side too
             st = self.dm_store(uid, create=bool(msg["v"]) or uid in self.dms)
@@ -444,6 +466,8 @@ class Core(QObject):
                     self.channels_changed.emit()
         elif t == "state" and isinstance(msg.get("state"), dict):
             self._set_state(uid, msg["state"])
+        elif t == "sb" and isinstance(msg.get("s"), str):
+            self._on_sound(uid, msg["s"][:120])
         elif t == "spk":
             st = self.states.setdefault(uid, {})
             st["speaking"] = bool(msg.get("on"))
@@ -522,6 +546,16 @@ class Core(QObject):
             if ev["file"] and not self.file_path(ev["file"]):
                 self.request_file(ev["file"], prefer=ev["a"])
             self.members_changed.emit()
+        elif k == "embed":
+            m = store.msg_by_id.get(ev["target"])
+            if ev["image"] and not self.file_path(ev["image"]):
+                self.request_file(ev["image"], prefer=ev["a"], only=self.dm_peer.get(m["ch"]) if m else None)
+            if m:
+                self.message_changed.emit(m["ch"], m["id"])
+        elif k == "sound":
+            if ev["file"] and not self.file_path(ev["file"]):
+                self.request_file(ev["file"], prefer=ev["a"])      # sounds must play instantly
+            self.sounds_changed.emit()
 
     def mentions_me(self, text):
         name = re.escape(self.s["name"])
@@ -534,7 +568,8 @@ class Core(QObject):
         personal = msg["ch"].startswith("dm:")          # a direct message counts as a mention
         if self.s["notify_mentions_only"] and not (personal or self.mentions_me(text)):
             return
-        body = text or "📎 " + ", ".join(f["name"] for f in msg["files"])
+        text = re.sub(r"\|\|(.+?)\|\|", "▒▒▒", text, flags=re.S)        # spoilers stay hidden
+        body = text or files_label(msg["files"])
         if personal:
             title = f"{self.name_of(msg['author'])}  ·  лично"
         else:
@@ -551,6 +586,16 @@ class Core(QObject):
                 self.s["read"][cid] = last
                 self.s.save()
                 self.read_changed.emit()
+                self._send_seen(cid)
+
+    def _send_seen(self, cid):
+        """In a conversation: let the other person know how far we have read («Прочитано»)."""
+        peer = self.dm_peer.get(cid)
+        if peer and self.s["read"].get(cid):
+            self.mesh.send(peer, {"t": "dm_read", "ch": cid, "ts": self.s["read"][cid]})
+
+    def seen_by_peer(self, cid):
+        return int(self.s.get("dm_seen", {}).get(cid, 0) or 0)
 
     def unread(self, cid):
         """(unread count, mentions) for a text channel."""
@@ -575,12 +620,162 @@ class Core(QObject):
                 metas.append(meta)
         text = text.strip()
         if text or metas:
-            self._publish("msg", store=self.store_for(cid), ch=cid, text=text, reply=reply, files=metas)
+            ev = self._publish("msg", store=self.store_for(cid), ch=cid, text=text, reply=reply, files=metas)
             self.mark_read(cid)
+            if ev:
+                self._make_previews(ev["id"], text)
 
     def edit_message(self, mid, text):
         if author_of(mid) == self.me:
             self._publish("edit", store=self.store_of_msg(mid), target=mid, text=text.strip())
+            self._make_previews(mid, text)
+
+    # ── link previews ───────────────────────────────────────────────
+    def _make_previews(self, mid, text):
+        """Open the links of my message (off the UI thread) and publish a card for each."""
+        if not self.s.get("link_previews", True):
+            return
+        have = {e["url"] for e in self.store_of_msg(mid).embeds_of(mid)}
+        urls = [u for u in linkpreview.links(text) if u not in have]
+        if not urls:
+            return
+
+        def fetch_all():
+            for url in urls:
+                try:
+                    card = linkpreview.fetch(url)
+                except Exception:
+                    continue
+                if not card:
+                    continue
+                data = card.pop("image_bytes", None)
+                card["image_path"] = ""
+                if data:
+                    tmp = Path(tempfile.mkdtemp(prefix="marincall-link-")) / "preview"
+                    try:
+                        if linkpreview.thumbnail(data, tmp):
+                            card["image_path"] = str(tmp)
+                    except Exception:
+                        pass
+                if card["title"] or card["image_path"]:
+                    self._embed_ready.emit(mid, card)
+        threading.Thread(target=fetch_all, daemon=True).start()
+
+    def _publish_embed(self, mid, card):
+        st = self.store_of_msg(mid)
+        if mid not in st.msg_by_id or mid in st.deleted:
+            return
+        fid = ""
+        if card.get("image_path"):
+            meta = self.import_file(card["image_path"])
+            fid = meta["id"] if meta else ""
+            shutil.rmtree(Path(card["image_path"]).parent, ignore_errors=True)
+        if card["title"] or fid:
+            self._publish("embed", store=st, target=mid, url=card["url"], title=card["title"],
+                          desc=card["desc"], site=card["site"], image=fid)
+
+    # ── soundboard ──────────────────────────────────────────────────
+    def soundboard(self):
+        """[(key, name, emoji, custom sound or None)]: the built-in sounds, then the room's own."""
+        out = [(f"b:{k}", name, emoji, None) for k, (name, emoji, _) in audio.BUILTIN.items()]
+        out += [(f"c:{x['id']}", x["name"], x["emoji"], x) for x in self.store.sound_list()]
+        return out
+
+    def _sound(self, key):
+        """(samples, label) of a soundboard key, or (None, label) if its file is not here yet."""
+        if key.startswith("b:") and key[2:] in audio.BUILTIN:
+            name, emoji, _ = audio.BUILTIN[key[2:]]
+            return audio.builtin(key[2:]), f"{emoji} {name}"
+        x = self.store.sounds.get(key[2:]) if key.startswith("c:") else None
+        if not x:
+            return None, ""
+        label = f"{x['emoji']} {x['name']}"
+        pcm = self._sb_pcm.get(x["file"])
+        if pcm is None:
+            path = self.file_path(x["file"])
+            if not path:
+                self.request_file(x["file"], prefer=x["by"])
+                return None, label
+            try:
+                pcm = audio.decode(path, audio.SOUND_SECONDS)
+            except Exception:
+                return None, label
+            self._sb_pcm[x["file"]] = pcm
+        return pcm, label
+
+    def play_sound(self, key):
+        """Play a soundboard sound for everyone in my voice channel."""
+        if not self.my_voice or not self._sb_allowed(self.me):
+            return False
+        pcm, label = self._sound(key)
+        if pcm is None:
+            self.toast.emit("Этот звук ещё скачивается", "error")
+            return False
+        for uid in list(self.voice.targets):
+            self.mesh.send(uid, {"t": "sb", "s": key})
+        self._play_pcm(pcm)
+        self.sound_played.emit(self.me, label)
+        return True
+
+    def _sb_allowed(self, uid):
+        """No more than 4 sounds in 5 seconds from anyone (and one at least 0.4 s apart)."""
+        now = time.monotonic()
+        recent = [t for t in self._sb_recent.get(uid, []) if now - t < 5]
+        if len(recent) >= 4 or (recent and now - recent[-1] < 0.4):
+            return False
+        self._sb_recent[uid] = recent + [now]
+        return True
+
+    def _play_pcm(self, pcm):
+        self._sb_slot = (self._sb_slot + 1) % 4         # up to four overlap
+        gain = self.s.get("soundboard_volume", 60) / 100.0
+        self.voice.play_clip(f"sb{self._sb_slot}", pcm, gain=gain, call=True)
+
+    def _on_sound(self, uid, key):
+        if not self.my_voice or uid not in self.voice.allowed or uid in self.s["local_mutes"]:
+            return
+        if not self._sb_allowed(uid):
+            return
+        pcm, label = self._sound(key)
+        if label:
+            self.sound_played.emit(uid, label)
+        if pcm is not None and self.s.get("soundboard", True) and not self.s["deafened"]:
+            self._play_pcm(pcm)
+
+    def preview_sound(self, key):
+        """Just for me (the soundboard's hover/right-click preview and Settings)."""
+        pcm, _ = self._sound(key)
+        if pcm is not None:
+            self._play_pcm(pcm)
+
+    def add_sound(self, path, name, emoji=""):
+        """A sound file → the room's soundboard (cut to five seconds, re-encoded small)."""
+        try:
+            pcm = audio.trim_silence(audio.decode(path, 30))[:audio.SR * audio.SOUND_SECONDS]
+        except Exception:
+            self.toast.emit("Не получилось прочитать этот звук", "error")
+            return False
+        if len(pcm) < audio.SR // 10:
+            self.toast.emit("В этом файле тишина", "error")
+            return False
+        top = float(abs(pcm).max()) or 1.0
+        pcm = pcm / top * 0.7
+        folder = Path(tempfile.mkdtemp(prefix="marincall-sound-"))
+        try:
+            out = folder / "sound.ogg"
+            audio.encode_ogg(pcm, out, bitrate=48000)
+            meta = self.import_file(out)
+        finally:
+            shutil.rmtree(folder, ignore_errors=True)
+        if not meta:
+            return False
+        self._publish("sound", file=meta["id"], name=name.strip()[:32] or "Звук",
+                      emoji=emoji.strip()[:16], target="")
+        return True
+
+    def remove_sound(self, sid):
+        if sid in self.store.sounds:
+            self._publish("sound", file="", name="", emoji="", target=sid)
 
     def delete_message(self, mid):
         if author_of(mid) == self.me:
@@ -790,6 +985,14 @@ class Core(QObject):
         self._broadcast_state()
         self.stream_changed.emit()
 
+    def watcher_names(self, limit=3):
+        """«Борис, Вика и ещё 2» — who watches my screen share right now."""
+        names = sorted(self.name_of(u) for u in self._watcher_uids())
+        if not names:
+            return ""
+        shown = ", ".join(names[:limit])
+        return shown + (f" и ещё {len(names) - limit}" if len(names) > limit else "")
+
     def _watcher_uids(self):
         return [u for u in self.watchers if u in self.mesh.peers_map]
 
@@ -821,6 +1024,56 @@ class Core(QObject):
     def file_path(fid):
         p = FILES_DIR / fid
         return p if p.exists() else None
+
+    def _kept_files(self):
+        """Files the cache cleanup must not touch: what I sent (I may be the only one who has
+        it), avatars and soundboard sounds (small, shown everywhere)."""
+        keep = {self.s.get("avatar") or ""}
+        for st in (self.store, *list(self.dms.values())):      # may run off the UI thread
+            keep.update(v[2] for v in list(st.avatars.values()))
+            keep.update(getattr(st, "sound_files", lambda: ())())
+            for msgs in list(st.messages.values()):
+                for m in list(msgs):
+                    if m["author"] in (self.me, self.s.get("legacy_uid")):
+                        keep.update(f["id"] for f in m["files"])
+            for mid, per in list(st.embeds.items()):         # pictures of my link cards
+                if author_of(mid) == self.me:
+                    keep.update(card[2]["image"] for card in list(per.values()))
+        keep.discard("")
+        return keep
+
+    def cache_size(self):
+        """(bytes the cleanup would free, bytes kept) in the file cache."""
+        keep = self._kept_files()
+        free = kept = 0
+        for p in FILES_DIR.iterdir() if FILES_DIR.exists() else ():
+            try:
+                size = p.stat().st_size
+            except OSError:
+                continue
+            if p.name in keep:
+                kept += size
+            elif p.name not in self.downloads and f"{p.stem}" not in self.downloads:
+                free += size
+        return free, kept
+
+    def clear_cache(self):
+        """Delete other people's files; they come back from the room when you open them."""
+        keep = self._kept_files()
+        freed = 0
+        for p in list(FILES_DIR.iterdir()) if FILES_DIR.exists() else ():
+            if p.name in keep or p.stem in self.downloads:
+                continue
+            try:
+                size = p.stat().st_size
+                p.unlink()
+                freed += size
+            except OSError:
+                pass
+        tmp = Path(tempfile.gettempdir()) / "MarinCall"        # copies made to open files
+        shutil.rmtree(tmp, ignore_errors=True)
+        self.cache_cleared.emit()
+        return freed
 
     def import_file(self, path):
         path = Path(path)

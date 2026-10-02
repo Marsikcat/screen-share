@@ -166,8 +166,8 @@ class Tile(QFrame):
             self.stats.setText(f"{w}×{h} · {fps:.0f} к/с" if w else "Подключаемся…")
         else:
             rate = self.core.sender.bitrate()
-            watchers = len(self.core.watchers)
-            who = "никто не смотрит" if not watchers else f"смотрят: {watchers}"
+            names = self.core.watcher_names()
+            who = f"смотрят: {names}" if names else "никто не смотрит"
             self.stats.setText(f"{who}   ·   {rate:.1f} Мбит/с".replace(".", ","))
 
     def paintEvent(self, e):
@@ -401,6 +401,11 @@ class MiniPlayer(QFrame):
         self.win.voiceview.update_target()
 
 
+def richtext_escape(text):
+    import html
+    return html.escape(text)
+
+
 class VoiceView(QWidget):
     stream_requested = Signal()
 
@@ -430,6 +435,13 @@ class VoiceView(QWidget):
         h.addWidget(ic)
         h.addWidget(self.title)
         h.addStretch(1)
+        self.sound_note = QLabel()
+        self.sound_note.setStyleSheet(f"color: {T.c['text']}; background: {T.c['side']}; border-radius: 10px;"
+                                      f"padding: 3px 10px;")
+        self.sound_note.hide()
+        h.addWidget(self.sound_note, 0, Qt.AlignVCenter)
+        self._note_timer = QTimer(self, singleShot=True, interval=3000, timeout=self.sound_note.hide)
+        core.sound_played.connect(self._sound_played)
         lay.addWidget(header)
 
         stage_bg = T.c["rail"] if not T.light else T.c["side"]
@@ -453,8 +465,9 @@ class VoiceView(QWidget):
         self.b_cam = self._round("video", "Камера", core.toggle_camera)
         self.b_deaf = self._round("headphones", "Звук", core.toggle_deafen)
         self.b_share = self._round("screen", "Демонстрация экрана", self._share)
+        self.b_sound = self._round("music", "Звуковая панель", self._soundboard)
         self.b_leave = self._round("phone_off", "Отключиться", core.leave_voice, danger=True)
-        for b in (self.b_mic, self.b_deaf, self.b_cam, self.b_share, self.b_leave):
+        for b in (self.b_mic, self.b_deaf, self.b_cam, self.b_share, self.b_sound, self.b_leave):
             c.addWidget(b)
         c.addStretch(1)
         lay.addWidget(self.controls)
@@ -485,6 +498,16 @@ class VoiceView(QWidget):
         b.setIcon(icons.icon(name, "white" if (b._danger or active or lit) else T.c["header"], 24))
         b.setStyleSheet(f"QToolButton {{ background: {bg}; border: none; border-radius: 28px; }}"
                         f"QToolButton:hover {{ background: {mix(bg, '#ffffff', 0.12)}; }}")
+
+    def _soundboard(self):
+        from .soundboard import open_soundboard
+        self._board = open_soundboard(self.b_sound, self.core)
+
+    def _sound_played(self, uid, what):
+        """«Борис: 🥁 Ба-дум-тсс» in the header for a few seconds."""
+        self.sound_note.setText(f"<b>{richtext_escape(self.core.name_of(uid))}</b>: {richtext_escape(what)}")
+        self.sound_note.show()
+        self._note_timer.start()
 
     def _share(self):
         if self.core.sender.running:
@@ -566,6 +589,7 @@ class VoiceView(QWidget):
         self.b_cam.setToolTip("Выключить камеру" if cam_on else "Включить камеру")
         self._paint_round(self.b_share, "screen_off" if self.core.sender.running else "screen",
                           self.core.sender.running)
+        self._paint_round(self.b_sound, "music", False)
         self._paint_round(self.b_leave, "phone_off", False)
         self.update_target()
 
@@ -795,7 +819,7 @@ class SourcePicker(QDialog):
             self.tab_group.addButton(b, i)
             tabs.addWidget(b)
         tabs.addStretch(1)
-        self.tab_group.idClicked.connect(self.pages.setCurrentIndex)
+        self.tab_group.idClicked.connect(self._tab)
         v.addLayout(tabs)
 
         screens = QWidget()
@@ -858,6 +882,14 @@ class SourcePicker(QDialog):
     def showEvent(self, e):
         super().showEvent(e)
         theme.style_window(self)
+
+    def _tab(self, index):
+        """A window: its own sound by default (as Discord does); a screen: the whole PC."""
+        self.pages.setCurrentIndex(index)
+        current = self.audio.currentData()
+        swap = {stream.SYSTEM_AUDIO: stream.APP_AUDIO} if index == 1 else {stream.APP_AUDIO: stream.SYSTEM_AUDIO}
+        if current in swap and self.audio.findData(swap[current]) >= 0:
+            self.audio.setCurrentIndex(self.audio.findData(swap[current]))
 
     def _accept(self):
         if self.pages.currentIndex() == 0:

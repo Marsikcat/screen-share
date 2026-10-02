@@ -13,7 +13,7 @@ from ..config import DISCOVERY_PORT, PEER_PORT, VERSION
 from . import icons
 from .settings import section, switch_row
 from .theme import T
-from .widgets import IconButton, LevelMeter, button, label
+from .widgets import IconButton, LevelMeter, button, human_size, label
 
 
 class Bridge(QObject):
@@ -324,6 +324,16 @@ def page_voice(view, v):
     v.addWidget(switch_row("Автоматическая громкость", "Выравнивает громкость: тихий голос подтягивает, "
                            "крик приглушает.", s["agc"], proc("agc")))
 
+    v.addWidget(section("Звуковая панель", "Короткие звуки для всех в голосовом канале — кнопка с нотой "
+                        "внизу канала. Свои звуки добавляются там же, кнопкой «+»."))
+    v.addWidget(switch_row("Звуки других участников", "Слышать звуки, которые включают другие. Когда "
+                           "звук выключен (наушники), звуков тоже не слышно.", s.get("soundboard", True),
+                           lambda on: (s.__setitem__("soundboard", on), s.save())))
+    sb = slider_row("Громкость звуковой панели", int(s.get("soundboard_volume", 60)), 0, 100,
+                    lambda x: s.__setitem__("soundboard_volume", x))
+    sb.layout().setContentsMargins(0, 12, 0, 0)
+    v.addWidget(sb)
+
 
 # ── stream ──────────────────────────────────────────────────────────
 def page_stream(view, v):
@@ -516,6 +526,53 @@ def page_network(view, v):
 
 
 # ── updates ─────────────────────────────────────────────────────────
+def page_chat(view, v):
+    s, core = view.s, view.core
+    v.addWidget(label("Текст и файлы", "h2"))
+    v.addWidget(section("Сообщения"))
+    v.addWidget(switch_row("Превью ссылок", "Под сообщением со ссылкой — карточка с заголовком, описанием "
+                           "и картинкой страницы. Страницу открывает ваш компьютер, когда вы отправляете "
+                           "ссылку; остальные видят готовую карточку.", s.get("link_previews", True),
+                           lambda on: (s.__setitem__("link_previews", on), s.save())))
+    v.addWidget(section("Файлы на этом компьютере", "Картинки и файлы из чатов хранятся у вас, чтобы "
+                        "открываться сразу. Чужие файлы можно удалить — когда вы откроете сообщение, "
+                        "файл снова скачается у участников, которые в сети. Ваши собственные файлы, "
+                        "аватарки и звуки не удаляются: у других их может не быть."))
+    info = label("", "muted", wrap=True)
+    clear = button("Очистить кэш", "danger")
+    row = QHBoxLayout()
+    row.setContentsMargins(0, 6, 0, 0)
+    row.addWidget(info, 1)
+    row.addWidget(clear)
+    v.addLayout(row)
+
+    def show(sizes):
+        try:
+            if isinstance(sizes, Exception):
+                info.setText("Не удалось посчитать размер")
+                return
+            free, kept = sizes
+            info.setText(f"Можно освободить: <b>{human_size(free)}</b><br>"
+                         f"Ваши файлы, аватарки и звуки: {human_size(kept)}")
+            clear.setEnabled(free > 0)
+        except RuntimeError:            # the page was closed while we counted
+            pass
+
+    def do_clear():
+        from .dialogs import confirm
+        if not confirm(view.win, "Очистить кэш файлов?", "Чужие картинки и файлы удалятся с этого "
+                       "компьютера и скачаются заново, когда понадобятся.", ok="Очистить"):
+            return
+        freed = core.clear_cache()
+        view.win.toast(f"Освобождено {human_size(freed)}")
+        view._cache_bridge = run_async(core.cache_size, show)
+
+    clear.clicked.connect(do_clear)
+    info.setText("Считаю…")
+    clear.setEnabled(False)
+    view._cache_bridge = run_async(core.cache_size, show)
+
+
 def page_updates(view, v):
     s, win = view.s, view.win
     c = T.c
@@ -524,9 +581,13 @@ def page_updates(view, v):
     v.addWidget(label(f"Установлена версия {VERSION}. Новые версии выходят как релизы на GitHub — "
                       f"с описанием изменений и установщиком. Ставится только установщик с подписью ключа "
                       f"MarinCall — подменить обновление нельзя.", "muted", wrap=True))
-    v.addWidget(switch_row("Проверять при запуске", "Тихо проверять, не вышел ли новый релиз, и показывать "
-                           "полоску сверху, если вышел.", s["check_updates"],
+    v.addWidget(switch_row("Проверять обновления", "При запуске и каждые 6 часов тихо проверять, не вышел ли "
+                           "новый релиз.", s["check_updates"],
                            lambda on: (s.__setitem__("check_updates", on), s.save())))
+    v.addWidget(switch_row("Устанавливать автоматически", "Новая версия скачивается в фоне, проверяется подпись, "
+                           "и она ставится, когда вы закроете MarinCall (или сразу — кнопкой на полоске сверху).",
+                           s.get("auto_update", True),
+                           lambda on: (s.__setitem__("auto_update", on), s.save())))
     row = QHBoxLayout()
     row.setSpacing(8)
     check = button("Проверить сейчас", "secondary")

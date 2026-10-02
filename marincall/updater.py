@@ -44,7 +44,8 @@ def _wanted(name):
     return name.endswith(".exe") and "setup" in name if FROZEN else name.endswith(".zip")
 
 
-_installer = None      # downloaded setup, run by restart()
+_installer = None      # downloaded setup, run by restart() or install_on_exit()
+_downloaded = None     # its version
 
 
 def _get(url, timeout=15, accept=None):
@@ -131,11 +132,12 @@ def apply(info=None):
     info = info or check()
     data = _verified(info)
     if FROZEN:
+        global _downloaded
         if not info["download"].lower().endswith(".exe"):
             raise RuntimeError("в релизе нет установщика — скачайте его со страницы релизов")
         path = Path(tempfile.gettempdir()) / asset_name(info["latest"])
         path.write_bytes(data)
-        _installer = path
+        _installer, _downloaded = path, info["latest"]
         return info["latest"]
     tmp = Path(tempfile.mkdtemp(prefix="marincall-update-"))
     try:
@@ -153,6 +155,21 @@ def apply(info=None):
         return (top / "VERSION").read_text(encoding="utf-8").strip()
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
+
+
+def downloaded():
+    """The version of an installer already downloaded and verified (installed builds)."""
+    return _downloaded
+
+
+def install_on_exit():
+    """Run the downloaded installer as the app closes; it does not start MarinCall again."""
+    if FROZEN and _installer:
+        subprocess.Popen([str(_installer), "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART",
+                          "/CLOSEAPPLICATIONS", "/NORELAUNCH=1"],
+                         creationflags=getattr(subprocess, "DETACHED_PROCESS", 0))
+        return True
+    return False
 
 
 def restart():

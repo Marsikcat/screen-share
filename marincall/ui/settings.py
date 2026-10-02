@@ -20,6 +20,7 @@ NAV = [
     ("hotkeys", ("keyboard", "Горячие клавиши")),
     ("stream", ("screen", "Демонстрация экрана")),
     ("notifications", ("bell", "Уведомления")),
+    ("chat", ("file", "Текст и файлы")),
     ("network", ("globe", "Сеть")),
     ("startup", ("power", "Запуск и трей")),
     ("updates", ("update", "Обновления")),

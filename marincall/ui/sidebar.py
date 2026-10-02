@@ -427,10 +427,10 @@ class Sidebar(QWidget):
         """While we are streaming: viewers and the real bitrate, so it is clear it is live."""
         if not self.core.sender.running:
             return
-        n = len(self.core.watchers)
+        who = self.core.watcher_names(2)
         rate = f"{self.core.sender.bitrate():.1f}".replace(".", ",")
         self.vp_stream.setText(f"В эфире: {self.core.stream_info}\n"
-                               f"{'Смотрят: ' + str(n) if n else 'Никто не смотрит'}  ·  {rate} Мбит/с")
+                               f"{'Смотрят: ' + who if who else 'Никто не смотрит'}  ·  {rate} Мбит/с")
         self.vp_stream.setVisible(True)
 
     def _build_user_panel(self):

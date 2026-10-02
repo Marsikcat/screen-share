@@ -102,8 +102,15 @@ DEFAULTS = {
     "close_to_tray": True,
     # misc
     "check_updates": True,
+    "auto_update": True,        # download in the background, install when the app closes
     "last_channel": "",
     "read": {},                 # channel id -> last read message sort key
+    "drafts": {},               # channel id -> text you started but did not send
+    "dm_seen": {},              # conversation id -> how far the other person has read
+    "recent_emoji": [],         # last picked emoji, newest first
+    "link_previews": True,      # fetch a title/picture card for links we send
+    "soundboard": True,         # play the soundboard sounds others send
+    "soundboard_volume": 60,
     "window": None,
 }
 
