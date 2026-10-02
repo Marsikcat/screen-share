@@ -178,12 +178,15 @@ class Peer:
         return {"via_relay": False, "via": "", "rtt": None}
 
 
-class OutStream:
-    """Screen share to one viewer: a one-way QUIC stream fed from any thread. If the
-    viewer can't keep up, the oldest chunks are dropped instead of piling up delay."""
+CAMERA_MAGIC = b"MCAM1\n"     # first bytes of a camera stream; a screen share starts with TS (0x47)
 
-    def __init__(self, mesh, uid, limit=1_500_000):
-        self.mesh, self.uid, self.limit = mesh, uid, limit
+
+class OutStream:
+    """Screen share (or camera) to one viewer: a one-way QUIC stream fed from any thread. If
+    the viewer can't keep up, the oldest chunks are dropped instead of piling up delay."""
+
+    def __init__(self, mesh, uid, limit=1_500_000, header=b""):
+        self.mesh, self.uid, self.limit, self.header = mesh, uid, limit, header
         self.chunks = collections.deque()
         self.size = 0
         self.dropped = 0
@@ -213,6 +216,8 @@ class OutStream:
             return
         try:
             stream = await peer.conn.open_uni()
+            if self.header:
+                await stream.write_all(self.header)
             while not self.closed:
                 await self.wake.wait()
                 self.wake.clear()
@@ -258,6 +263,7 @@ class Mesh(QObject):
         self.running = False
         self.on_voice = None         # callback(uid, bytes) — called on the network thread
         self.on_stream = None        # callback(uid, bytes | None) — None when the stream ends
+        self.on_camera = None        # the same for camera streams
         self._stopped = threading.Event()
         self._ifaces, self._neighbours = [], []
 
@@ -484,17 +490,29 @@ class Mesh(QObject):
             asyncio.create_task(self._read_stream(peer.uid, rs))
 
     async def _read_stream(self, uid, rs):
+        handler = None
+        head = b""
         try:
             while True:
                 chunk = await rs.read(64 * 1024)
                 if not chunk:
                     break
-                if self.on_stream:
-                    self.on_stream(uid, chunk)
+                if handler is None:          # which kind of stream is it? (a camera says so first)
+                    head += chunk
+                    if len(head) < len(CAMERA_MAGIC) and CAMERA_MAGIC.startswith(head):
+                        continue
+                    if head.startswith(CAMERA_MAGIC):
+                        handler, chunk = "camera", head[len(CAMERA_MAGIC):]
+                    else:
+                        handler, chunk = "screen", head
+                callback = self.on_camera if handler == "camera" else self.on_stream
+                if callback and chunk:
+                    callback(uid, chunk)
         except Exception:
             pass
-        if self.on_stream:
-            self.on_stream(uid, None)
+        callback = self.on_camera if handler == "camera" else self.on_stream
+        if callback:
+            callback(uid, None)
 
     # ── sending (any thread) ────────────────────────────────────────
     def send(self, uid, obj):
@@ -516,8 +534,8 @@ class Mesh(QObject):
             except Exception:
                 pass
 
-    def open_stream(self, uid):
-        out = OutStream(self, uid)
+    def open_stream(self, uid, header=b""):
+        out = OutStream(self, uid, header=header)
         if self.loop:
             asyncio.run_coroutine_threadsafe(out.run(), self.loop)
         return out

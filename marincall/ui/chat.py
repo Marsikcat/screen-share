@@ -18,6 +18,25 @@ from .widgets import Avatar, IconButton, label
 
 PAGE = 80
 GROUP_GAP_MS = 7 * 60 * 1000
+UNREAD_REACH = 400          # how far back a channel opens to show its first unread message
+
+
+class NewDivider(QWidget):
+    """The red line before the first message you have not read yet."""
+
+    def __init__(self):
+        super().__init__()
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(16, 10, 16, 2)
+        lay.setSpacing(0)
+        line = QFrame()
+        line.setFixedHeight(1)
+        line.setStyleSheet(f"background: {T.c['red']};")
+        lay.addWidget(line, 1)
+        tag = QLabel("НОВЫЕ")
+        tag.setStyleSheet(f"background: {T.c['red']}; color: white; font-size: {T.px(7)}pt; font-weight: 800;"
+                          f"padding: 1px 6px; border-radius: 3px;")
+        lay.addWidget(tag)
 
 
 class HoverToolbar(QFrame):
@@ -102,6 +121,16 @@ class MessageList(QScrollArea):
         self._stick = True
         self.verticalScrollBar().rangeChanged.connect(self._on_range)
         self._loading = False
+        self.unread_since = None   # messages after this moment get the «НОВЫЕ» line
+        self._divider = None
+        self._missed = 0           # arrived while you were reading older messages
+        self.jump = QToolButton(self.viewport())
+        self.jump.setCursor(Qt.PointingHandCursor)
+        self.jump.setStyleSheet(f"QToolButton {{ background: {T.c['accent']}; color: white; border: none;"
+                                f"border-radius: 14px; padding: 5px 14px; font-weight: 600; }}"
+                                f"QToolButton:hover {{ background: {T.c['accent_hover']}; }}")
+        self.jump.clicked.connect(self.to_present)
+        self.jump.hide()
 
     def at_bottom(self):
         sb = self.verticalScrollBar()
@@ -121,26 +150,82 @@ class MessageList(QScrollArea):
                 item.widget().deleteLater()
         self.shown = []
 
-    def set_channel(self, cid, keep_scroll=False):
+    def _first_unread(self, msgs):
+        if self.unread_since is None:
+            return None
+        return next((i for i, m in enumerate(msgs)
+                     if m["ts"] > self.unread_since and m["author"] != self.core.me), None)
+
+    def set_channel(self, cid, keep_scroll=False, fresh=False):
+        """fresh: the channel was just opened — show where the unread messages begin."""
         old = self.verticalScrollBar().value()
         if keep_scroll and cid == self.cid and self.at_bottom() and not self._loading:
             keep_scroll = False                 # rebuilt while at the bottom: stay at the bottom
         self.cid = cid
         msgs = self.core.store_for(cid).visible_messages(cid)
+        first_unread = self._first_unread(msgs)
         if not keep_scroll:
             self.start = max(0, len(msgs) - PAGE)
+            if fresh and first_unread is not None:
+                self.start = min(self.start, max(first_unread - 5, len(msgs) - UNREAD_REACH, 0))
         self.start = min(self.start, max(0, len(msgs) - 1)) if msgs else 0
         self._clear()
+        self._divider = None
         if self.start == 0:
             self.col.addWidget(self._welcome())
         prev = None
-        for m in msgs[self.start:]:
-            self._add(m, prev)
+        for i, m in enumerate(msgs[self.start:], self.start):
+            self._add(m, prev, first_unread=i == first_unread)
             prev = m
+        self._missed = 0
         if keep_scroll:
             QTimer.singleShot(0, lambda: self.verticalScrollBar().setValue(old))
+        elif fresh and self._divider is not None:
+            QTimer.singleShot(60, self._show_divider)
         else:
             self.scroll_bottom()
+        QTimer.singleShot(100, self._update_jump)
+
+    def _show_divider(self):
+        """Open at the first unread message — unless all of them fit on the screen anyway."""
+        div = self._divider
+        if div is None:
+            return
+        y = div.mapTo(self.content, div.rect().topLeft()).y()
+        if self.content.height() - y > self.viewport().height():
+            self.verticalScrollBar().setValue(max(0, y - 40))
+            self._stick = False
+        else:
+            self.verticalScrollBar().setValue(self.verticalScrollBar().maximum())
+        self._update_jump()
+
+    def to_present(self):
+        msgs = self.core.store_for(self.cid).visible_messages(self.cid)
+        if self.start < len(msgs) - 2 * PAGE:      # far back in history: load just the latest again
+            self.set_channel(self.cid)
+        self._stick = True
+        self.scroll_bottom()
+        self._missed = 0
+        self.jump.hide()
+
+    def _update_jump(self):
+        sb = self.verticalScrollBar()
+        far = sb.maximum() - sb.value() > self.viewport().height() // 2
+        if far or self._missed:
+            self.jump.setText(f"Новых сообщений: {self._missed}  ↓" if self._missed else "К последним сообщениям  ↓")
+            self.jump.adjustSize()
+            self.jump.move((self.viewport().width() - self.jump.width()) // 2,
+                           self.viewport().height() - self.jump.height() - 12)
+            self.jump.show()
+            self.jump.raise_()
+        else:
+            self.jump.hide()
+            if sb.value() >= sb.maximum() - 40:
+                self._missed = 0
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        self._update_jump()
 
     def _welcome(self):
         ch = self.core.channel(self.cid) or {"name": "", "kind": "text"}
@@ -168,11 +253,15 @@ class MessageList(QScrollArea):
         return (prev is not None and prev["author"] == m["author"] and not m.get("reply")
                 and m["ts"] - prev["ts"] < GROUP_GAP_MS and day_title(m["ts"]) == day_title(prev["ts"]))
 
-    def _add(self, m, prev, index=None):
+    def _add(self, m, prev, index=None, first_unread=False):
         widgets = []
         if prev is None or day_title(prev["ts"]) != day_title(m["ts"]):
             widgets.append(DateDivider(m["ts"]))
-        w = MessageWidget(self.core, m, first=not self._group_with(m, prev))
+        if first_unread:                         # under the date, above the message
+            self._divider = NewDivider()
+            widgets.append(self._divider)
+        # the first new message starts its own group, with the author shown
+        w = MessageWidget(self.core, m, first=first_unread or not self._group_with(m, prev))
         w.hovered.connect(self.toolbar.attach)
         w.reply_clicked.connect(self.reveal)
         widgets.append(w)
@@ -187,6 +276,8 @@ class MessageList(QScrollArea):
 
     def append(self, msg):
         stick = self.at_bottom() or msg["author"] == self.core.me
+        if not stick:
+            self._missed += 1                   # shown on the «Новых сообщений: N ↓» button
         msgs = self.core.store_for(self.cid).visible_messages(self.cid)
         if msgs and msgs[-1]["id"] == msg["id"]:
             prev = self.shown[-1][0] if self.shown else None
@@ -195,6 +286,7 @@ class MessageList(QScrollArea):
             self.set_channel(self.cid, keep_scroll=not stick)
         if stick:
             self.scroll_bottom()
+        self._update_jump()
 
     def widget_for(self, mid):
         return next((w for m, w in self.shown if m["id"] == mid), None)
@@ -253,6 +345,7 @@ class MessageList(QScrollArea):
     def _on_scroll(self, value):
         if not self._loading:
             self._stick = value >= self.verticalScrollBar().maximum() - 40
+        self._update_jump()
         if value == 0 and self.start > 0 and not self._loading:
             self._loading = True
             sb = self.verticalScrollBar()
@@ -589,7 +682,8 @@ class ChatView(QWidget):
         self.composer.set_placeholder(("@" if dm else "#") + ch["name"])
         if changed:
             self.composer.clear_reply()
-            self.list.set_channel(cid)
+            self.list.unread_since = self.core.s["read"].get(cid, 0)
+            self.list.set_channel(cid, fresh=True)
             self.composer.show_typing(self.core.typers(cid))
         self.core.mark_read(cid)
         self.composer.input.setFocus()

@@ -106,12 +106,17 @@ def peer(role, secs):
             c.send_message(dm, "Привет! Это личное сообщение — его видим только мы двое 🙂")
             c.send_message(dm, "Во сколько сегодня собираемся?")
         c.join_voice("d:voice:general")
+        c.set_status("dnd")
+        c.s["camera_device"] = "__test__"       # a test pattern instead of a webcam
+        _run(app, 1)
+        c.start_camera()
     else:
         c.send_message(general, "", files=[str(ROOT / "assets" / "icon.png")])
         c.join_voice("d:voice:general")
         _run(app, 1)
         # a test pattern and a tone through the real encoder — the real screen is never captured
         c.start_stream({"kind": "test", "label": "Тестовая таблица", "height": 720})
+        c.set_status("idle")
     t0 = time.time()
     stop = Path(os.environ.get("MARINCALL_SCREENS_STOP", "-"))
     while time.time() - t0 < secs and not stop.exists():
@@ -129,7 +134,8 @@ def tour(theme_name):
     QGuiApplication.setHighDpiScaleFactorRoundingPolicy(Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
     app = QApplication(sys.argv[:1])
     s = _settings("Алиса", "#ed4245", theme=theme_name, muted=False, deafened=False,
-                  last_channel="d:text:general", stream_volume=0)
+                  last_channel="d:text:general", stream_volume=0, camera_device="__test__",
+                  pause_preview_inactive=False)
     from marincall.ui import theme
     theme.apply(app, s)
     from marincall.core import Core
@@ -140,6 +146,8 @@ def tour(theme_name):
 
     core = Core(s)
     general = "d:text:general"
+    for i in range(1, 21):                    # some history to scroll back through
+        core.send_message(general, f"Старое сообщение №{i}")
     core.send_message(general, "Всем привет! Это **MarinCall** — наш *собственный* чат. "
                       "Ссылка на проект: https://github.com/Marsikcat/screen-share")
     core.send_message(general, "**Жирный**, *курсив*, ~~зачёркнутый~~ и `код`:\n"
@@ -148,6 +156,7 @@ def tour(theme_name):
                       "перенос строк: " + "бла-бла " * 30)
     core.send_message(general, "🔥🎮")
     core.send_message(general, "", files=[str(ROOT / "CHANGELOG.md")])
+    core.toast.connect(lambda text, kind: print(f"уведомление ({kind}): {text}", flush=True))
     win = MainWindow(core, app)
     win.resize(1320, 820)
     win.show()
@@ -217,6 +226,9 @@ def tour(theme_name):
         (800, lambda: shot(win, "03_voice_not_joined")),
         (200, lambda: core.join_voice("d:voice:general")),
         (2500, lambda: shot(win, "04_voice_joined")),
+        (200, core.start_camera),
+        (3500, lambda: shot(win, "04b_voice_cameras")),
+        (200, core.stop_camera),
         (200, lambda: win.open_channel("d:voice:games")),
         (600, lambda: shot(win, "05_voice_empty_channel")),
         (200, lambda: win.open_channel("d:text:media")),
@@ -233,7 +245,11 @@ def tour(theme_name):
         (4000, lambda: shot(win, "08_watching_stream")),
         (200, fullscreen),
         (1500, fullscreen_shot),
+        (300, lambda: win.open_channel(general)),
+        (2500, lambda: shot(win, "13_mini_player")),
         (300, core.unwatch),
+        (300, lambda: win.chat.list.verticalScrollBar().setValue(0)),
+        (600, lambda: shot(win, "14_jump_to_present")),
     ]
     for page in ("profile", "appearance", "voice", "hotkeys", "stream", "notifications", "network",
                  "startup", "updates", "about"):

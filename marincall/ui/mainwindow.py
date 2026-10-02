@@ -20,7 +20,7 @@ from .settings import SettingsView
 from .settings_pages import run_async
 from .sidebar import Sidebar
 from .theme import T
-from .voiceview import SourcePicker, VoiceView
+from .voiceview import MiniPlayer, SourcePicker, VoiceView
 from .widgets import Toast, button
 
 
@@ -68,6 +68,8 @@ class MainWindow(QMainWindow):
         core.toast.connect(self.toast)
         core.notify.connect(self.on_notify)
         core.channels_changed.connect(self._check_current)
+        core.stream_changed.connect(self.update_mini)       # after the voice view has rebuilt
+        core.voice_changed.connect(self.update_mini)
         # global hotkeys (mute, deafen, stream…) — also active while the window is focused
         self.hotkeys = HotkeyManager(self.s, lambda: QApplication.activeWindow() is not None,
                                      self._is_typing)
@@ -135,6 +137,10 @@ class MainWindow(QMainWindow):
         self.voiceview.stream_requested.connect(self.pick_stream)
         self.views.addWidget(self.chat)
         self.views.addWidget(self.voiceview)
+        if getattr(self, "mini", None) is not None:
+            self.mini.deleteLater()
+        self.mini = MiniPlayer(self, self.core)
+        self.voiceview.mini = self.mini
         v.addWidget(self.views, 1)
         self.members = MemberList(self.core)
         self.members.setVisible(self.s.get("show_members", True))
@@ -181,12 +187,36 @@ class MainWindow(QMainWindow):
             self.views.setCurrentWidget(self.voiceview)
         self.sidebar.select(cid)
         self.close_settings()
+        self.update_mini()
 
     def _check_current(self):
         if self.current and not self.core.channel(self.current):
             texts = self.core.store.channel_list("text")
             if texts:
                 self.open_channel(texts[0]["id"])
+
+    # ── the mini player ─────────────────────────────────────────────
+    def update_mini(self):
+        """Show the stream you watch in a corner whenever its big tile is out of sight."""
+        mini = getattr(self, "mini", None)
+        if mini is None:
+            return
+        vv = self.voiceview
+        in_view = (self.stack.currentWidget() is self.root and self.views.currentWidget() is vv
+                   and vv.big is not None)
+        show = bool(self.core.viewer.uid) and not in_view and vv.full is None
+        if show:
+            mini.refresh_title()
+            if vv.frame is not None:
+                mini.set_frame(vv.frame)
+            mini.place()
+        mini.setVisible(show)
+        vv.update_target()
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        if getattr(self, "mini", None) is not None and self.mini.isVisible():
+            self.mini.place()
 
     # ── direct messages & search ────────────────────────────────────
     def open_dm(self, uid):
@@ -300,6 +330,7 @@ class MainWindow(QMainWindow):
         self.stack.addWidget(self.settings_view)
         self.stack.setCurrentWidget(self.settings_view)
         self.settings_view.setFocus()
+        self.update_mini()
 
     def close_settings(self):
         if self.settings_view:
@@ -309,6 +340,7 @@ class MainWindow(QMainWindow):
             self.settings_view.deleteLater()
             self.settings_view = None
             self.sidebar.update_user()
+            self.update_mini()
 
     def apply_appearance(self):
         page = self.settings_view.page_key if self.settings_view else "appearance"
@@ -374,6 +406,9 @@ class MainWindow(QMainWindow):
         self.toaster.show_text(text, kind)
 
     def on_notify(self, title, body, cid):
+        if self.core.do_not_disturb():
+            self.sidebar.update_unread()
+            return
         active = self.isVisible() and self.isActiveWindow()
         if active and self.current == cid and self.stack.currentWidget() is self.root:
             return
@@ -442,7 +477,33 @@ class MainWindow(QMainWindow):
         self.raise_()
         self.activateWindow()
 
+    # ── previews: no work for nobody ────────────────────────────────
+    def update_previews(self):
+        """Your own share/camera preview pauses while another window is active (if chosen) and
+        always while the window is minimized or in the tray; friends' video only in the latter."""
+        if not hasattr(self, "voiceview"):
+            return
+        vv = self.voiceview
+        shown = self.isVisible() and not self.isMinimized()
+        focused = self.isActiveWindow() or (vv.full is not None and vv.full.isActiveWindow())
+        pause_own = not shown or (self.s.get("pause_preview_inactive", True) and not focused)
+        self.core.preview.paused = pause_own
+        self.core.cameras.set_paused(self.core.me, pause_own)
+        vv.window_shown = shown
+        vv.update_target()
+        vv.refresh_paused()
+
+    def showEvent(self, e):
+        super().showEvent(e)
+        self.update_previews()
+
+    def hideEvent(self, e):
+        super().hideEvent(e)
+        self.update_previews()
+
     def changeEvent(self, e):
+        if e.type() in (e.Type.ActivationChange, e.Type.WindowStateChange):
+            QTimer.singleShot(0, self.update_previews)
         if e.type() == e.Type.ActivationChange and self.isActiveWindow() and self.current:
             ch = self.core.channel(self.current)
             if ch and ch["kind"] in ("text", "dm"):

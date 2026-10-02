@@ -58,6 +58,39 @@ def human_size(n):
 
 
 _pictures = {}                  # (path, pixels) -> QPixmap, square and scaled
+STATUS_COLORS = {"online": "#23a55a", "idle": "#f0b232", "dnd": "#f23f43"}
+STATUS_NAMES = {"online": "В сети", "idle": "Отошёл", "dnd": "Не беспокоить", "offline": "Не в сети"}
+
+
+def status_mark(status, dot):
+    """The shape of a presence dot, as Discord draws them."""
+    d = dot.width()
+    mark = QPainterPath()
+    mark.addEllipse(dot)
+    cut = QPainterPath()
+    if status == "offline":                      # a hollow ring
+        k = d * 0.27
+        cut.addEllipse(dot.adjusted(k, k, -k, -k))
+    elif status == "idle":                       # a crescent moon
+        cut.addEllipse(QRectF(dot.x() - d * 0.12, dot.y() - d * 0.12, d * 0.62, d * 0.62))
+    elif status == "dnd":                        # a bar across
+        cut.addRoundedRect(QRectF(dot.x() + d * 0.2, dot.center().y() - d * 0.11, d * 0.6, d * 0.22),
+                           d * 0.11, d * 0.11)
+    return mark.subtracted(cut) if not cut.isEmpty() else mark
+
+
+def status_icon(status, size=12):
+    """A menu icon: just the dot."""
+    from PySide6.QtGui import QIcon
+    pm = QPixmap(size * 2, size * 2)
+    pm.fill(Qt.transparent)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.Antialiasing)
+    p.setPen(Qt.NoPen)
+    p.setBrush(QColor(STATUS_COLORS.get(status, T.c["muted"])))
+    p.drawPath(status_mark(status, QRectF(2, 2, size * 2 - 4, size * 2 - 4)))
+    p.end()
+    return QIcon(pm)
 _KEEP = object()
 
 
@@ -180,15 +213,9 @@ class Avatar(QWidget):
             p.drawText(rect, Qt.AlignCenter, (self._name[:1] or "?").upper())
         if dot:
             p.setPen(Qt.NoPen)
-            mark = QPainterPath()
-            mark.addEllipse(dot)
-            if self.status == "offline":        # hollow grey ring
-                k = dot.width() * 0.27
-                inner = QPainterPath()
-                inner.addEllipse(dot.adjusted(k, k, -k, -k))
-                mark = mark.subtracted(inner)
-            p.setBrush(QColor(T.c["green"] if self.status == "online" else T.c["muted"]))
-            p.drawPath(mark)
+            p.setBrush(QColor(STATUS_COLORS.get(self.status, T.c["muted"])
+                              if self.status != "offline" else T.c["muted"]))
+            p.drawPath(status_mark(self.status, dot))
 
 
 class IconButton(QToolButton):

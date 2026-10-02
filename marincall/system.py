@@ -21,6 +21,21 @@ def _launch_command():
     return f'"{pyw if pyw.exists() else exe}" "{ROOT / "app.py"}" --autostart'
 
 
+class _LASTINPUTINFO(ctypes.Structure):
+    _fields_ = [("cbSize", ctypes.c_uint), ("dwTime", ctypes.c_uint)]
+
+
+def idle_seconds():
+    """How long nobody has touched the keyboard or the mouse (anywhere in Windows)."""
+    try:
+        info = _LASTINPUTINFO(ctypes.sizeof(_LASTINPUTINFO), 0)
+        if not ctypes.windll.user32.GetLastInputInfo(ctypes.byref(info)):
+            return 0.0
+        return ((ctypes.windll.kernel32.GetTickCount() - info.dwTime) & 0xFFFFFFFF) / 1000
+    except (OSError, AttributeError):
+        return 0.0
+
+
 def autostart_enabled():
     import winreg
     for name in (RUN_NAME, OLD_RUN_NAME):

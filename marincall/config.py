@@ -53,6 +53,7 @@ DEFAULTS = {
     "name": "",
     "color": None,
     "avatar": "",               # file id of the profile picture, "" = the coloured letter
+    "status": "online",         # online | idle | dnd — what you chose (away is also automatic)
     "room": "общая",
     "room_secret": "",          # hex; empty = derived from the room name (open LAN room)
     "network_mode": "internet", # internet (relays + NAT traversal) | lan (direct only)
@@ -85,6 +86,8 @@ DEFAULTS = {
     "stream_encoder": "auto",   # auto | nvenc | cpu
     "stream_audio": "system",   # "system" = the PC minus MarinCall, a dshow device, "" = none
     "stream_volume": 100,       # the sound of streams we watch, percent
+    "camera_device": "",        # DirectShow video device for video calls, "" = the first one
+    "pause_preview_inactive": True,  # own share/camera preview pauses while another window is active
     # notifications
     "sounds": True,
     "notify": True,

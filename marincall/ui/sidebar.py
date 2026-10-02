@@ -7,7 +7,7 @@ from PySide6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QMenu, QScrollArea, 
 from .. import hotkeys
 from . import icons
 from .theme import T
-from .widgets import Avatar, IconButton
+from .widgets import STATUS_NAMES, Avatar, IconButton, status_icon
 
 
 def elide(text, n):
@@ -31,6 +31,7 @@ class ChannelItem(QFrame):
         lay.setSpacing(6)
         if self.kind == "dm":                       # a conversation: the person's picture
             self.icon = Avatar.of(ch["member"], 22)
+            self.icon.status = ch["member"]["status"]
         else:
             self.icon = QLabel()
         self.name = QLabel(elide(ch["name"], 26))
@@ -204,6 +205,7 @@ class Sidebar(QWidget):
         while self.list_lay.count():
             it = self.list_lay.takeAt(0)
             if it.widget():
+                it.widget().hide()
                 it.widget().deleteLater()
         self.items, self.voice_rows = {}, {}
         store = self.core.store
@@ -436,12 +438,20 @@ class Sidebar(QWidget):
         panel.setObjectName("UserPanel")
         panel.setFixedHeight(56)
         h = QHBoxLayout(panel)
-        h.setContentsMargins(8, 0, 8, 0)
+        h.setContentsMargins(6, 0, 8, 0)
         h.setSpacing(2)
+        # avatar + name: click to pick a status, as in Discord
+        me = QFrame()
+        me.setObjectName("MeBox")
+        me.setCursor(Qt.PointingHandCursor)
+        me.setToolTip("Статус: в сети, отошёл, не беспокоить")
+        me.setStyleSheet(f"#MeBox {{ border-radius: 4px; }} #MeBox:hover {{ background: {T.c['hover']}; }}")
+        mh = QHBoxLayout(me)
+        mh.setContentsMargins(2, 4, 6, 4)
+        mh.setSpacing(6)
         self.me_avatar = Avatar.of(self.core.member(self.core.me), 32)
-        self.me_avatar.status = "online"
-        h.addWidget(self.me_avatar)
-        h.addSpacing(6)
+        self.me_avatar.status = self.core.my_status()
+        mh.addWidget(self.me_avatar)
         info = QVBoxLayout()
         info.setSpacing(0)
         self.me_name = QLabel()
@@ -450,7 +460,9 @@ class Sidebar(QWidget):
         self.me_sub.setProperty("role", "hint")
         info.addWidget(self.me_name)
         info.addWidget(self.me_sub)
-        h.addLayout(info, 1)
+        mh.addLayout(info, 1)
+        me.mousePressEvent = lambda e: self.status_menu(me)
+        h.addWidget(me, 1)
         self.mic_btn = IconButton("mic", "Выкл. микрофон", 20, 32, checkable=True, danger_when_checked=True)
         self.mic_btn.clicked.connect(self.core.toggle_mute)
         self.deaf_btn = IconButton("headphones", "Выкл. звук", 20, 32, checkable=True, danger_when_checked=True)
@@ -466,12 +478,30 @@ class Sidebar(QWidget):
         self.update_user()
         return panel
 
+    def status_menu(self, anchor):
+        m = QMenu(self)
+        current = self.core.s.get("status") or "online"
+        hints = {"online": "", "idle": "  ·  сам включается через 10 мин бездействия",
+                 "dnd": "  ·  без уведомлений и звуков сообщений"}
+        for key in ("online", "idle", "dnd"):
+            act = m.addAction(status_icon(key), STATUS_NAMES[key] + hints[key],
+                              lambda k=key: self.core.set_status(k))
+            act.setCheckable(True)
+            act.setChecked(key == current)
+        m.exec(anchor.mapToGlobal(QPoint(0, -m.sizeHint().height() - 4)))
+
     def update_user(self):
         s = self.core.s
         self.me_avatar.set(s["name"], s["color"], self.core.avatar_path(self.core.me))
+        self.me_avatar.status = self.core.my_status()
+        self.me_avatar.update()
         self.me_name.setText(elide(s["name"] or "Без имени", 16))
         peers = self.core.mesh.peers()
-        self.me_sub.setText(f"На связи: {len(peers)}" if peers else "Вы пока одни")
+        status = self.core.my_status()
+        if status != "online":
+            self.me_sub.setText(STATUS_NAMES[status])
+        else:
+            self.me_sub.setText(f"На связи: {len(peers)}" if peers else "Вы пока одни")
         self.me_sub.setToolTip("Соединены с: " + ", ".join(self.core.name_of(u) for u in peers)
                                if peers else "Никто из комнаты сейчас не в сети")
         muted = s["muted"] or s["deafened"]

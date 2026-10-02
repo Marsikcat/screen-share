@@ -81,6 +81,9 @@ PATHS = {
            '0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z"/>',
     "at": '<circle cx="12" cy="12" r="4"/><path d="M16 8v5a3 3 0 0 0 6 0v-1a10 10 0 1 0-4 8"/>',
 }
+PATHS["video"] = ('<path d="m16 13 5.22 3.48a.5.5 0 0 0 .78-.42V7.87a.5.5 0 0 0-.75-.43L16 10.5"/>'
+                  '<rect x="2" y="6" width="14" height="12" rx="2"/>')
+PATHS["video_off"] = PATHS["video"] + SLASH
 PATHS["mic_off"] = PATHS["mic"] + SLASH
 PATHS["headphones_off"] = PATHS["headphones"] + SLASH
 

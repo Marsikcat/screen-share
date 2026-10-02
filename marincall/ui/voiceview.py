@@ -62,6 +62,7 @@ class Tile(QFrame):
         self.m = m
         self.preview = None          # live thumbnail of our own screen share
         self.frame = None            # the picture of the stream we watch (mode "watch")
+        self.cam = None              # the person's camera, if it is on
         self.stats = None
         self.speaking = self.core.is_speaking(uid) and not m["state"].get("muted")
         st = m["state"]
@@ -150,6 +151,12 @@ class Tile(QFrame):
         self.frame = img
         self.update()
 
+    def set_camera(self, img):
+        self.cam = img
+        if img is not None and self.mode != "watch":
+            self.avatar.hide()                   # the face is the avatar now
+        self.update()
+
     def update_stats(self):
         if self.stats is None:
             return
@@ -163,7 +170,23 @@ class Tile(QFrame):
             who = "никто не смотрит" if not watchers else f"смотрят: {watchers}"
             self.stats.setText(f"{who}   ·   {rate:.1f} Мбит/с".replace(".", ","))
 
-    def paintEvent(self, _):
+    def paintEvent(self, e):
+        self._paint(e)
+        if self.uid == self.core.me and self.mode != "watch" and (
+                (self.preview is not None and self.core.preview.paused)
+                or (self.cam is not None and self.core.cameras.paused(self.uid))):
+            p = QPainter(self)
+            p.setRenderHint(QPainter.Antialiasing)
+            path = QPainterPath()
+            path.addRoundedRect(QRectF(self.rect()).adjusted(1.5, 1.5, -1.5, -1.5), 10, 10)
+            p.fillPath(path, QColor(0, 0, 0, 120))
+            p.setPen(QColor("white"))
+            f = p.font()
+            f.setBold(True)
+            p.setFont(f)
+            p.drawText(self.rect(), Qt.AlignCenter, "Предпросмотр на паузе\nокно MarinCall не активно")
+
+    def _paint(self, _):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
         r = QRectF(self.rect()).adjusted(1.5, 1.5, -1.5, -1.5)
@@ -171,6 +194,25 @@ class Tile(QFrame):
         p.setBrush(QColor("#000000" if watching else mix(self.m["color"], T.c["rail"], 0.55)))
         p.setPen(QPen(QColor(T.c["green"]), 3) if self.speaking and not watching else Qt.NoPen)
         p.drawRoundedRect(r, 10, 10)
+        if not watching and self.cam is not None and not self.cam.isNull() and self.preview is None:
+            path = QPainterPath()
+            path.addRoundedRect(r, 10, 10)
+            p.setClipPath(path)
+            img = self.cam
+            k = max(r.width() / img.width(), r.height() / img.height())     # cover the tile
+            w, h = img.width() * k, img.height() * k
+            if self.uid == self.core.me:         # yourself as in a mirror, as every app shows it
+                p.translate(r.x() + r.right(), 0)
+                p.scale(-1, 1)
+            p.setRenderHint(QPainter.SmoothPixmapTransform)
+            p.drawImage(QRectF(r.center().x() - w / 2, r.center().y() - h / 2, w, h), img)
+            p.resetTransform()
+            p.setClipping(False)
+            if self.speaking:
+                p.setPen(QPen(QColor(T.c["green"]), 3))
+                p.setBrush(Qt.NoBrush)
+                p.drawRoundedRect(r, 10, 10)
+            return
         picture = self.frame if watching else self.preview
         if picture is not None and not picture.isNull():
             path = QPainterPath()
@@ -192,6 +234,9 @@ class Tile(QFrame):
         super().resizeEvent(e)
         if self.mode == "watch":
             self.view.update_target()
+        else:                                   # the camera picture is made to fit the tile
+            dpr = self.devicePixelRatioF()
+            self.core.cameras.set_target(self.uid, (int(self.width() * dpr), int(self.height() * dpr)))
 
     def mouseDoubleClickEvent(self, e):
         if self.mode == "watch":
@@ -253,6 +298,109 @@ class StreamWindow(QWidget):
         super().closeEvent(e)
 
 
+class MiniPlayer(QFrame):
+    """The stream you watch, small in a corner while you are elsewhere in the app.
+    Drag it anywhere; double click — back to the voice channel."""
+
+    W, H = 336, 189
+
+    def __init__(self, window, core):
+        super().__init__(window)
+        self.win, self.core = window, core
+        self.frame = None
+        self._drag = None
+        self._corner = None             # offset from the bottom-right corner, kept on resize
+        self.setFixedSize(self.W, self.H)
+        self.setCursor(Qt.OpenHandCursor)
+        self.setToolTip("Двойной щелчок — вернуться к трансляции, перетащите, чтобы подвинуть")
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(8, 8, 8, 8)
+        top = QHBoxLayout()
+        top.setSpacing(4)
+        self.title = QLabel()
+        self.title.setStyleSheet(BADGE)
+        top.addWidget(self.title)
+        top.addStretch(1)
+        for name, tip, fn in (("volume", "Вернуться к трансляции", self.back),
+                              ("screen", "Во весь экран", lambda: self.win.voiceview.open_fullscreen()),
+                              ("x", "Прекратить просмотр", self.core.unwatch)):
+            b = QToolButton()
+            b.setIcon(icons.icon(name, "white", 16))
+            b.setIconSize(QSize(16, 16))
+            b.setFixedSize(28, 28)
+            b.setToolTip(tip)
+            b.setCursor(Qt.PointingHandCursor)
+            b.setStyleSheet("QToolButton { background: rgba(0,0,0,0.55); border: none; border-radius: 4px; }"
+                            "QToolButton:hover { background: rgba(0,0,0,0.8); }")
+            b.clicked.connect(fn)
+            top.addWidget(b)
+        lay.addLayout(top)
+        lay.addStretch(1)
+        self.hide()
+
+    def set_frame(self, img):
+        self.frame = img
+        self.update()
+
+    def refresh_title(self):
+        uid = self.core.viewer.uid
+        self.title.setText(f"Трансляция · {self.core.name_of(uid)}" if uid else "")
+
+    def place(self):
+        """Bottom-right above the message box, or where it was dragged to."""
+        w, h = self.win.width(), self.win.height()
+        dx, dy = self._corner or (24, 96)
+        x = max(8, min(w - self.W - 8, w - self.W - dx))
+        y = max(8, min(h - self.H - 8, h - self.H - dy))
+        self.move(x, y)
+        self.raise_()
+
+    def back(self):
+        uid = self.core.viewer.uid
+        cid = self.core.states.get(uid, {}).get("voice") if uid else None
+        if cid:
+            self.win.open_channel(cid)
+
+    def paintEvent(self, _):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        r = QRectF(self.rect()).adjusted(1, 1, -1, -1)
+        path = QPainterPath()
+        path.addRoundedRect(r, 10, 10)
+        p.fillPath(path, QColor("#000000"))
+        if self.frame is not None and not self.frame.isNull():
+            p.setClipPath(path)
+            _draw_frame(p, self.frame, r)
+            p.setClipping(False)
+        p.setPen(QPen(QColor(T.c["border"]), 1))
+        p.drawPath(path)
+
+    def mousePressEvent(self, e):
+        if e.button() == Qt.LeftButton:
+            self._drag = e.position().toPoint()
+            self.setCursor(Qt.ClosedHandCursor)
+
+    def mouseMoveEvent(self, e):
+        if self._drag is not None:
+            pos = self.mapToParent(e.position().toPoint() - self._drag)
+            w, h = self.win.width(), self.win.height()
+            pos.setX(max(8, min(w - self.W - 8, pos.x())))
+            pos.setY(max(8, min(h - self.H - 8, pos.y())))
+            self.move(pos)
+            self._corner = (w - self.W - pos.x(), h - self.H - pos.y())
+
+    def mouseReleaseEvent(self, e):
+        self._drag = None
+        self.setCursor(Qt.OpenHandCursor)
+
+    def mouseDoubleClickEvent(self, e):
+        self.back()
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        self.win.voiceview.update_target()
+
+
 class VoiceView(QWidget):
     stream_requested = Signal()
 
@@ -265,6 +413,8 @@ class VoiceView(QWidget):
         self.frame = None                   # last picture of the stream we watch
         self.big = None                     # the tile showing it
         self.full = None                    # …or the full-screen window
+        self.mini = None                    # …or the mini player (set by the main window)
+        self.window_shown = True            # False while the window is minimized or in the tray
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(0)
@@ -300,10 +450,11 @@ class VoiceView(QWidget):
         c.setSpacing(14)
         c.addStretch(1)
         self.b_mic = self._round("mic", "Микрофон", core.toggle_mute)
+        self.b_cam = self._round("video", "Камера", core.toggle_camera)
         self.b_deaf = self._round("headphones", "Звук", core.toggle_deafen)
         self.b_share = self._round("screen", "Демонстрация экрана", self._share)
         self.b_leave = self._round("phone_off", "Отключиться", core.leave_voice, danger=True)
-        for b in (self.b_mic, self.b_deaf, self.b_share, self.b_leave):
+        for b in (self.b_mic, self.b_deaf, self.b_cam, self.b_share, self.b_leave):
             c.addWidget(b)
         c.addStretch(1)
         lay.addWidget(self.controls)
@@ -313,6 +464,8 @@ class VoiceView(QWidget):
         core.members_changed.connect(self.rebuild)
         core.speaking_changed.connect(self._speaking)
         core.preview.frame.connect(self._on_preview)
+        core.cameras.frame_ready.connect(self._on_camera)
+        self.cam_frames = {}                # uid -> last camera picture (survives rebuilds)
         core.viewer.frame_ready.connect(self._on_frame)
         self._stats_timer = QTimer(self, interval=1000, timeout=self._update_stats)
         self._stats_timer.start()
@@ -327,9 +480,9 @@ class VoiceView(QWidget):
         b._name, b._danger = name, danger
         return b
 
-    def _paint_round(self, b, name, active):
-        bg = T.c["red"] if (b._danger or active) else T.c["active"]
-        b.setIcon(icons.icon(name, "white" if (b._danger or active) else T.c["header"], 24))
+    def _paint_round(self, b, name, active, lit=False):
+        bg = T.c["red"] if (b._danger or active) else (T.c["green"] if lit else T.c["active"])
+        b.setIcon(icons.icon(name, "white" if (b._danger or active or lit) else T.c["header"], 24))
         b.setStyleSheet(f"QToolButton {{ background: {bg}; border: none; border-radius: 28px; }}"
                         f"QToolButton:hover {{ background: {mix(bg, '#ffffff', 0.12)}; }}")
 
@@ -377,6 +530,7 @@ class VoiceView(QWidget):
                     t = Tile(self, uid, "small")
                     if uid == self.core.me and self.core.sender.running:
                         t.set_preview(self.preview)
+                    self._camera_to(t)
                     t.setFixedSize(*SMALL)
                     self.tiles[uid] = t
                     row.addWidget(t)
@@ -394,6 +548,7 @@ class VoiceView(QWidget):
                     t = Tile(self, uid)
                     if uid == self.core.me and self.core.sender.running:
                         t.set_preview(self.preview)
+                    self._camera_to(t)
                     self.tiles[uid] = t
                     row.addWidget(t)
                 row.addStretch(1)
@@ -406,6 +561,9 @@ class VoiceView(QWidget):
         self._paint_round(self.b_mic, "mic_off" if s["muted"] or s["deafened"] else "mic",
                           s["muted"] or s["deafened"])
         self._paint_round(self.b_deaf, "headphones_off" if s["deafened"] else "headphones", s["deafened"])
+        cam_on = self.core.camera_on()
+        self._paint_round(self.b_cam, "video" if cam_on else "video_off", False, lit=cam_on)
+        self.b_cam.setToolTip("Выключить камеру" if cam_on else "Включить камеру")
         self._paint_round(self.b_share, "screen_off" if self.core.sender.running else "screen",
                           self.core.sender.running)
         self._paint_round(self.b_leave, "phone_off", False)
@@ -439,7 +597,17 @@ class VoiceView(QWidget):
     def update_target(self):
         """Tell the decoder how big the picture is shown, and whether anyone sees it."""
         viewer = self.core.viewer
-        shown = self.full if self.full is not None else (self.big if self.isVisible() else None)
+        self.core.cameras.set_visible(self.isVisible() and self.window_shown)
+        if self.full is not None:
+            shown = self.full
+        elif not self.window_shown:           # minimized / in the tray: just the sound
+            shown = None
+        elif self.big is not None and self.isVisible():
+            shown = self.big
+        elif self.mini is not None and self.mini.isVisible():
+            shown = self.mini
+        else:
+            shown = None
         viewer.show_video = shown is not None
         if shown is not None:
             dpr = shown.devicePixelRatioF()
@@ -452,8 +620,10 @@ class VoiceView(QWidget):
         self.frame = img
         if self.full is not None:
             self.full.set_frame(img)
-        elif self.big is not None:
+        elif self.big is not None and self.isVisible():
             self.big.set_frame(img)
+        elif self.mini is not None and self.mini.isVisible():
+            self.mini.set_frame(img)
 
     def open_fullscreen(self):
         uid = self.core.viewer.uid
@@ -468,11 +638,18 @@ class VoiceView(QWidget):
             self.full.showFullScreen()
         self.full.raise_()
         self.full.activateWindow()
+        self._mini_changed()
         self.update_target()
+
+    def _mini_changed(self):
+        win = self.window()
+        if hasattr(win, "update_mini"):
+            win.update_mini()
 
     def fullscreen_closed(self, win):
         if self.full is win:
             self.full = None
+            self._mini_changed()
             if self.big is not None and self.frame is not None:
                 self.big.set_frame(self.frame)
             self.update_target()
@@ -514,6 +691,27 @@ class VoiceView(QWidget):
     def hideEvent(self, e):
         super().hideEvent(e)
         self.update_target()          # in another channel: keep the sound, skip the pictures
+
+    def refresh_paused(self):
+        for tile in self.tiles.values():
+            tile.update()
+
+    def _camera_to(self, tile):
+        if self.core.cameras.has(tile.uid) and tile.uid in self.cam_frames:
+            tile.set_camera(self.cam_frames[tile.uid])
+        elif not self.core.cameras.has(tile.uid):
+            self.cam_frames.pop(tile.uid, None)
+
+    def _on_camera(self, uid):
+        img = self.core.cameras.take_frame(uid)
+        if img is None:
+            return
+        self.cam_frames[uid] = img
+        tile = self.tiles.get(uid)
+        if tile is not None and tile.mode != "watch":
+            tile.set_camera(img)
+            dpr = tile.devicePixelRatioF()           # decode at the size the tile has now
+            self.core.cameras.set_target(uid, (int(tile.width() * dpr), int(tile.height() * dpr)))
 
     def _invite(self, ch, uids):
         w = QWidget()

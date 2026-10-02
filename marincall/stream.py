@@ -33,6 +33,8 @@ from . import loopback
 from .config import FROZEN, ROOT
 
 SYSTEM_AUDIO = "system"         # stream_audio value: process loopback without our own sounds
+CAMERA = {"h": 360, "fps": 30, "kbps": 800}      # a webcam in a voice channel
+TEST_CAMERA = "__test__"        # camera_device for tools/screens.py: a test pattern, no hardware
 
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
@@ -209,6 +211,7 @@ class SourcePreview(QObject):
         super().__init__()
         self._thread = None
         self._stop = threading.Event()
+        self.paused = False         # nobody is looking: don't grab the screen at all
 
     def start(self, source, fps=3, width=520):
         self.stop()
@@ -236,6 +239,9 @@ class SourcePreview(QObject):
         with mss.MSS() as sct:
             while not self._stop.is_set():
                 t0 = time.perf_counter()
+                if self.paused:
+                    self._stop.wait(0.25)
+                    continue
                 try:
                     region = self._region(source)
                     if region:
@@ -260,6 +266,16 @@ def audio_choices():
 
 def list_audio_devices():
     """DirectShow audio inputs, loopback-style devices first ("Stereo Mix", "CABLE"…)."""
+    names = _dshow_devices("audio")
+    loop_kw = ("stereo mix", "стерео микшер", "cable", "loopback", "what u hear", "virtual")
+    return sorted(dict.fromkeys(names), key=lambda n: not any(k in n.lower() for k in loop_kw))
+
+
+def list_cameras():
+    return list(dict.fromkeys(_dshow_devices("video")))
+
+
+def _dshow_devices(kind):
     try:
         import av
         import av.logging
@@ -275,12 +291,11 @@ def list_audio_devices():
             except Exception:
                 pass
         for _level, _name, line in logs:
-            if "(audio)" in line and '"' in line:
+            if f"({kind})" in line and '"' in line:
                 names.append(line.split('"')[1])
     finally:
         av.logging.set_level(old)
-    loop_kw = ("stereo mix", "стерео микшер", "cable", "loopback", "what u hear", "virtual")
-    return sorted(dict.fromkeys(names), key=lambda n: not any(k in n.lower() for k in loop_kw))
+    return names
 
 
 # ── sender ──────────────────────────────────────────────────────────
@@ -295,9 +310,11 @@ class StreamSender(QObject):
     stopped = Signal(str)       # "" when stopped on purpose, otherwise the error
     warning = Signal(str)       # started, but not quite as asked (e.g. without sound)
 
-    def __init__(self, mesh):
+    def __init__(self, mesh, header=b""):
         super().__init__()
         self.mesh = mesh
+        self.header = header        # a camera stream says so in its first bytes
+        self.tap = None             # callback(bytes): our own copy (the camera self-view)
         self.proc = None
         self.outs = {}              # viewer uid -> net.OutStream
         self.running = False
@@ -310,7 +327,7 @@ class StreamSender(QObject):
 
     def start(self, source, quality, encoder="auto", audio=""):
         self.stop()
-        q = QUALITY.get(quality, QUALITY["1080p60"])
+        q = quality if isinstance(quality, dict) else QUALITY.get(quality, QUALITY["1080p60"])
         nvenc = encoder == "nvenc" or (encoder == "auto" and has_nvenc())
         if audio == SYSTEM_AUDIO and not loopback.available():
             self.warning.emit("Звук компьютера без голосового чата есть только в Windows 10 2004 и новее "
@@ -347,7 +364,7 @@ class StreamSender(QObject):
             if uid not in uids:
                 self.outs.pop(uid).close()
         for uid in uids - set(self.outs):
-            self.outs[uid] = self.mesh.open_stream(uid)
+            self.outs[uid] = self.mesh.open_stream(uid, header=self.header)
 
     def _relay_loop(self, listener):
         try:
@@ -372,6 +389,8 @@ class StreamSender(QObject):
                 chunk, pending = pending[:n], pending[n:]
                 for out in list(self.outs.values()):
                     out.push(chunk)
+                if self.tap is not None:
+                    self.tap(chunk)
         conn.close()
 
     def bitrate(self):
@@ -389,6 +408,8 @@ class StreamSender(QObject):
             line = raw.decode("utf-8", errors="replace").strip()
             if line.startswith("WARN "):
                 self.warning.emit(line[5:] + " — трансляция без звука")
+            elif line.startswith("INFO NVENC"):
+                self.encoder_label = "CPU (x264)"
             elif line and not line.startswith("OK "):
                 self._err_tail = (self._err_tail + [line])[-3:]
         proc.wait()
@@ -453,86 +474,76 @@ class _ByteQueue:
             return out
 
 
-class StreamViewer(QObject):
-    """Watches one peer's screen share: decodes it and hands out the newest picture."""
+class VideoDecoder(QObject):
+    """One incoming MPEG-TS stream → the newest picture (and its sound, if `voice` is given)."""
 
-    closed = Signal(str)        # uid of the streamer — the stream could not be shown
-    frame_ready = Signal()      # a new picture: take it with take_frame()
+    frame_ready = Signal(object)    # self: a new picture, take it with take_frame()
+    ended = Signal(object)          # self: the stream stopped by itself (not via stop())
 
-    BEHIND = 3 * 1024 * 1024    # this much undecoded data waiting: skip pictures to catch up
+    BEHIND = 3 * 1024 * 1024        # this much undecoded data waiting: skip pictures to catch up
 
-    def __init__(self, mesh, voice):
+    def __init__(self, voice=None, uid=None):
         super().__init__()
-        mesh.on_stream = self._on_stream
-        self.voice = voice
-        self.uid = None
+        self.voice, self.uid = voice, uid
         self.target = (1280, 720)   # device pixels the picture is shown at (set by the UI)
+        self.fill = False           # True: cover the target (cropped), False: fit inside it
         self.show_video = True      # False while nobody looks: only the sound is decoded
         self.source_size = (0, 0)
         self.fps = 0.0
-        self._queue = None
-        self._thread = None
+        self._queue = _ByteQueue()
+        self._stopped = False
         self._lock = threading.Lock()
         self._frame = None
         self._waiting = False
 
-    def _on_stream(self, uid, chunk):
-        """Bytes of a screen share arriving over QUIC (network thread)."""
-        q = self._queue
-        if uid == self.uid and q is not None and chunk is not None:
-            q.put(chunk)
+    def start(self):
+        threading.Thread(target=self._run, daemon=True, name="video-decoder").start()
 
-    def watch(self, uid, title=""):
-        self.stop()
-        self.uid = uid
-        self._queue = _ByteQueue()
-        self._frame = None
-        self.source_size, self.fps = (0, 0), 0.0
-        self._thread = threading.Thread(target=self._run, args=(uid, self._queue), daemon=True,
-                                        name="stream-view")
-        self._thread.start()
-        return True
+    def feed(self, chunk):
+        if not self._stopped:
+            self._queue.put(chunk)
 
     def stop(self):
-        q, self._queue = self._queue, None
-        self.uid = None
-        if q:
-            q.close()
-        self.voice.clear_stream_audio()
+        self._stopped = True
+        self._queue.close()
+        if self.voice is not None:
+            self.voice.clear_stream_audio()
 
     def take_frame(self):
         with self._lock:
             self._waiting = False
             return self._frame
 
-    # ── decoding (own thread) ───────────────────────────────────────
-    def _run(self, uid, q):
+    def _run(self):
         import av
+        q = self._queue
         try:
             container = av.open(q, mode="r", format="mpegts",
                                 options={"probesize": "300000", "analyzeduration": "500000",
                                          "fflags": "nobuffer", "flags": "low_delay"})
         except Exception:
-            if self._queue is q:
-                self.closed.emit(uid)
+            if not self._stopped:
+                self.ended.emit(self)
             return
         video = container.streams.video[0] if container.streams.video else None
-        audio = container.streams.audio[0] if container.streams.audio else None
+        audio = container.streams.audio[0] if container.streams.audio and self.voice else None
         if video is not None:
             video.thread_type = "SLICE"             # frame threads would add a frame of delay each
         resampler = av.AudioResampler(format="flt", layout="stereo", rate=48000) if audio else None
         from av.video.reformatter import VideoReformatter
         self._reformatter = VideoReformatter()      # reused: keeps its scaler, ~10× cheaper per frame
         vindex = video.index if video is not None else -1       # packet.stream is a new object each time
+        aindex = audio.index if audio is not None else -1
         keyframe = False            # until the first one the picture would be grey mush
         shown, t_mark = 0, time.monotonic()
         try:
             for packet in container.demux([st for st in (video, audio) if st is not None]):
-                if self._queue is not q:
+                if self._stopped:
                     break
                 if packet.size == 0:
                     continue
-                if packet.stream.index == vindex and not keyframe:
+                index = packet.stream.index
+                if index == vindex and not keyframe:
                     if not packet.is_keyframe:
                         continue
                     keyframe = True
@@ -541,37 +552,187 @@ class StreamViewer(QObject):
                 except av.error.FFmpegError:
                     continue                        # a lost piece: carry on from the next one
                 for frame in frames:
-                    if packet.stream.index == vindex:
+                    if index == vindex:
                         # skip the picture if we are behind or the UI has not shown the last one yet
                         if self.show_video and q.pending() < self.BEHIND and not self._waiting:
                             self._publish(frame)
                             shown += 1
-                    elif resampler is not None:
+                    elif index == aindex and resampler is not None:
                         for out in resampler.resample(frame):
                             self.voice.push_stream_audio(out.to_ndarray().reshape(-1, 2))
                 now = time.monotonic()
                 if now - t_mark >= 1.0:
                     self.fps, shown, t_mark = shown / (now - t_mark), 0, now
         except Exception:
-            pass
+            import traceback
+            traceback.print_exc()                   # into app.log: a picture that froze should say why
         finally:
             container.close()
-        if self._queue is q:                        # ended by itself, not by stop()
-            self.closed.emit(uid)
+        if not self._stopped:
+            self.ended.emit(self)
 
     def _publish(self, frame):
         w, h = frame.width, frame.height
         self.source_size = (w, h)
         tw, th = self.target
-        k = min(tw / w, th / h, 2.0)
+        k = max(tw / w, th / h) if self.fill else min(tw / w, th / h)
+        k = min(k, 2.0)
         dw, dh = max(2, int(w * k) // 2 * 2), max(2, int(h * k) // 2 * 2)
         rgb = self._reformatter.reformat(frame, width=dw, height=dh, format="bgra",
                                          interpolation="BILINEAR", threads=2)
-        arr = rgb.to_ndarray()
-        img = QImage(arr.data, dw, dh, arr.strides[0], QImage.Format_RGB32).copy()
+        # straight from FFmpeg's buffer: rows can be padded for alignment (line_size > dw * 4)
+        plane = rgb.planes[0]
+        img = QImage(bytes(plane), dw, dh, plane.line_size, QImage.Format_RGB32).copy()
         with self._lock:
             self._frame = img
             notify = not self._waiting
             self._waiting = True
         if notify:
+            self.frame_ready.emit(self)
+
+
+class StreamViewer(QObject):
+    """Watches one peer's screen share: decodes it and hands out the newest picture."""
+
+    closed = Signal(str)        # uid of the streamer — the stream could not be shown
+    frame_ready = Signal()      # a new picture: take it with take_frame()
+
+    def __init__(self, mesh, voice):
+        super().__init__()
+        mesh.on_stream = self._on_stream
+        self.voice = voice
+        self.uid = None
+        self._dec = None
+        self._target = (1280, 720)
+        self._show = True
+
+    # the decoder's knobs, kept across watches
+    @property
+    def target(self):
+        return self._target
+
+    @target.setter
+    def target(self, value):
+        self._target = value
+        if self._dec is not None:
+            self._dec.target = value
+
+    @property
+    def show_video(self):
+        return self._show
+
+    @show_video.setter
+    def show_video(self, value):
+        self._show = value
+        if self._dec is not None:
+            self._dec.show_video = value
+
+    @property
+    def source_size(self):
+        return self._dec.source_size if self._dec else (0, 0)
+
+    @property
+    def fps(self):
+        return self._dec.fps if self._dec else 0.0
+
+    def _on_stream(self, uid, chunk):
+        """Bytes of a screen share arriving over QUIC (network thread)."""
+        dec = self._dec
+        if uid == self.uid and dec is not None and chunk is not None:
+            dec.feed(chunk)
+
+    def watch(self, uid, title=""):
+        self.stop()
+        self.uid = uid
+        dec = VideoDecoder(self.voice, uid)
+        dec.target, dec.show_video = self._target, self._show
+        dec.frame_ready.connect(self._on_frame)
+        dec.ended.connect(self._on_ended)
+        self._dec = dec
+        dec.start()
+        return True
+
+    def _on_frame(self, dec):
+        if dec is self._dec:
             self.frame_ready.emit()
+
+    def _on_ended(self, dec):
+        if dec is self._dec:
+            self.closed.emit(dec.uid)
+
+    def stop(self):
+        dec, self._dec = self._dec, None
+        self.uid = None
+        if dec is not None:
+            dec.stop()
+        else:
+            self.voice.clear_stream_audio()
+
+    def take_frame(self):
+        return self._dec.take_frame() if self._dec else None
+
+
+class CameraHub(QObject):
+    """The cameras of everyone in our voice channel (and our own self-view): one decoder each."""
+
+    frame_ready = Signal(str)       # uid with a new picture
+
+    def __init__(self, mesh):
+        super().__init__()
+        mesh.on_camera = self._on_camera
+        self.decoders = {}          # uid -> VideoDecoder
+        self.show_video = True
+        self._paused = set()        # uids whose pictures are not wanted now (our own self-view)
+
+    def set_sources(self, uids):
+        uids = set(uids)
+        for uid in [u for u in self.decoders if u not in uids]:
+            self.decoders.pop(uid).stop()
+        for uid in uids - set(self.decoders):
+            dec = VideoDecoder(None, uid)
+            dec.fill, dec.target = True, (640, 360)
+            dec.show_video = self.show_video and uid not in self._paused
+            dec.frame_ready.connect(self._on_frame)
+            self.decoders[uid] = dec
+            dec.start()
+
+    def _on_camera(self, uid, chunk):
+        """Bytes of someone's camera (network thread)."""
+        dec = self.decoders.get(uid)
+        if dec is not None and chunk is not None:
+            dec.feed(chunk)
+
+    feed_local = _on_camera         # our own encoded camera, for the self-view
+
+    def _on_frame(self, dec):
+        if self.decoders.get(dec.uid) is dec:
+            self.frame_ready.emit(dec.uid)
+
+    def take_frame(self, uid):
+        dec = self.decoders.get(uid)
+        return dec.take_frame() if dec else None
+
+    def has(self, uid):
+        return uid in self.decoders
+
+    def set_target(self, uid, size):
+        dec = self.decoders.get(uid)
+        if dec is not None:
+            dec.target = size
+
+    def set_visible(self, on):
+        self.show_video = on
+        for uid, dec in self.decoders.items():
+            dec.show_video = on and uid not in self._paused
+
+    def set_paused(self, uid, paused):
+        (self._paused.add if paused else self._paused.discard)(uid)
+        dec = self.decoders.get(uid)
+        if dec is not None:
+            dec.show_video = self.show_video and not paused
+
+    def paused(self, uid):
+        return uid in self._paused
+
+    def stop(self):
+        self.set_sources(())

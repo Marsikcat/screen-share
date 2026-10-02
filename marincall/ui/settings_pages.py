@@ -196,6 +196,17 @@ def page_voice(view, v):
     grid.setColumnStretch(1, 1)
     v.addLayout(grid)
 
+    v.addWidget(section("Камера", "Для видео в голосовом канале — кнопка с камерой внизу канала."))
+    cam = QComboBox()
+    cams = stream.list_cameras()
+    if not cams:
+        cam.addItem("Камера не найдена", "")
+    for name in cams:
+        cam.addItem(name, name)
+    cam.setCurrentIndex(max(0, cam.findData(s.get("camera_device") or "")))
+    cam.currentIndexChanged.connect(lambda: (s.__setitem__("camera_device", cam.currentData()), s.save()))
+    v.addWidget(cam)
+
     # mic test
     v.addWidget(section("Проверка микрофона", "Скажите что-нибудь — вы услышите себя. "
                         "Полоса показывает уровень, метка на ней — порог срабатывания."))
@@ -354,6 +365,15 @@ def page_stream(view, v):
     v.addLayout(grid)
     v.addSpacing(8)
     v.addWidget(label("«Звук компьютера» — всё, что играет на этом ПК, кроме самого MarinCall: зрители слышат игру или видео, но не голоса из канала и не себя. Нужна Windows 10 2004 или новее.", "hint", wrap=True))
+    def pause_changed(on):
+        s["pause_preview_inactive"] = on
+        s.save()
+        view.win.update_previews()
+    v.addWidget(switch_row("Пауза предпросмотра, когда окно не активно",
+                           "Картинка вашей трансляции и вашей камеры не обновляется, пока вы в игре или "
+                           "другом окне, — меньше нагрузка на процессор. Друзья видят всё как обычно, а "
+                           "трансляции и камеры друзей продолжают показываться (например, на втором мониторе).",
+                           s.get("pause_preview_inactive", True), pause_changed))
     v.addSpacing(16)
     v.addWidget(slider_row("Громкость трансляций, которые вы смотрите", s["stream_volume"], 0, 200,
                            lambda x: s.__setitem__("stream_volume", x)))

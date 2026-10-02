@@ -23,7 +23,7 @@ class MemberRow(QFrame):
         lay.setContentsMargins(8, 4, 8, 4)
         lay.setSpacing(10)
         av = Avatar.of(m, 32)
-        av.status = "online" if m["online"] else "offline"
+        av.status = m["status"]
         lay.addWidget(av)
         col = QVBoxLayout()
         col.setSpacing(0)
@@ -85,6 +85,7 @@ class MemberList(QWidget):
         while self.col.count():
             it = self.col.takeAt(0)
             if it.widget():
+                it.widget().hide()
                 it.widget().deleteLater()
         members = self.core.members()
         online = [m for m in members if m["online"]]

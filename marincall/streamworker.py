@@ -7,6 +7,8 @@ windows, x264 and scaled shares go through system memory. Sound is either everyt
 the PC plays except MarinCall (loopback.py) or a DirectShow device. The MPEG-TS goes to
 a loopback TCP socket the app reads and relays to the viewers.
 
+The same worker sends a webcam (`camera`): DirectShow video, small and steady.
+
 A separate process keeps the encoder away from the app's voice and UI threads, and the
 app ties it to its own lifetime (a job object), so it never outlives MarinCall.
 """
@@ -65,6 +67,19 @@ class Worker:
         target = self.cfg.get("height")
         if src["kind"] == "test":                       # tools/screens.py: no real screen involved
             return av.open(f"testsrc2=s=1280x720:r={fps}", format="lavfi")
+        if src["kind"] == "camera_test":                # …and no real webcam
+            return av.open(f"testsrc=s=640x360:r={fps}", format="lavfi")
+        if src["kind"] == "camera":
+            # webcams offer a handful of modes: try the usual good ones, then whatever it gives
+            last = None
+            for mode in ({"video_size": "1280x720", "framerate": str(fps)},
+                         {"video_size": "640x480", "framerate": str(fps)}, {}):
+                try:
+                    return av.open(f"video={src['device']}", format="dshow",
+                                   options={**mode, "rtbufsize": "64M"})
+                except av.error.FFmpegError as e:
+                    last = e
+            raise last
         if src["kind"] == "monitor" and src.get("dxgi") is not None:
             graph = f"ddagrab=output_idx={src['dxgi']}:framerate={fps}:draw_mouse=1"
             scale = target if target and src.get("height", 0) > target else None
@@ -123,7 +138,7 @@ class Worker:
         last = -1
         frames = [first]
         stream = vin.decode(video=0)
-        paced = self.cfg["source"]["kind"] == "test"      # a generator, not a live screen
+        paced = self.cfg["source"]["kind"] in ("test", "camera_test")    # generators, not live
         while not self.stopping.is_set():
             frame = frames.pop() if frames else next(stream)
             if paced:
@@ -204,9 +219,25 @@ class Worker:
                 sent += len(chunk) // 2
             time.sleep(0.01)
 
+    @staticmethod
+    def _nvenc_free():
+        """Can we get an NVENC session right now? (consumer GPUs allow only a few at once)"""
+        import av
+        try:
+            ctx = av.CodecContext.create("h264_nvenc", "w")
+            ctx.width, ctx.height, ctx.pix_fmt = 256, 256, "yuv420p"
+            ctx.time_base = Fraction(1, 30)
+            ctx.open()
+            return True
+        except Exception:
+            return False
+
     # ── run ─────────────────────────────────────────────────────────
     def run(self):
         import av
+        if self.cfg["encoder"] == "nvenc" and not self._nvenc_free():
+            self.cfg["encoder"] = "x264"           # the video card is busy: the processor encodes
+            _say("INFO NVENC занят — кодирует процессор")
         sock = socket.create_connection(("127.0.0.1", self.cfg["port"]), timeout=10)
         sock.settimeout(None)
         sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)

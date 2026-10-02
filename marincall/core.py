@@ -14,9 +14,12 @@ import iroh
 from PySide6.QtCore import QObject, QTimer, Signal
 
 from .config import FILES_DIR, MAX_FILE, VERSION
-from .net import Mesh, make_invite, parse_invite
+from .net import CAMERA_MAGIC, Mesh, make_invite, parse_invite
 from .store import UID_RE, Store, author_of, text_channel_name
-from .stream import SourcePreview, StreamSender, StreamViewer
+from .system import idle_seconds
+
+IDLE_AFTER = 10 * 60          # s without keyboard or mouse: «Отошёл»
+from .stream import CAMERA, TEST_CAMERA, CameraHub, SourcePreview, StreamSender, StreamViewer, list_cameras
 from .voice import VoiceEngine
 
 FILE_CHUNK = 192 * 1024
@@ -61,6 +64,8 @@ class Core(QObject):
         self._last_typing = 0.0
         self._avatar_files = {}     # file id -> path (None: not here yet)
         self._private_files = {}    # file id -> the only peer to ask (direct messages)
+        self._auto_idle = False     # away from the keyboard (the chosen status stays «В сети»)
+        self._idle_check = 0
 
         self.mesh = Mesh(settings, self._hello_payload)
         self.mesh.peer_up.connect(self._on_peer_up)
@@ -78,6 +83,14 @@ class Core(QObject):
         self.sender.warning.connect(lambda m: self.toast.emit(m, "error"))
         self.viewer = StreamViewer(self.mesh, self.voice)
         self.viewer.closed.connect(self._on_viewer_closed)
+        # webcams: ours goes to everyone in the voice channel who asks, theirs come to us
+        self.camera = StreamSender(self.mesh, header=CAMERA_MAGIC)
+        self.camera.stopped.connect(self._on_camera_stopped)
+        self.camera.warning.connect(lambda m: self.toast.emit(m, "error"))
+        self.camera.tap = lambda chunk: self.cameras.feed_local(self.me, chunk)
+        self.cameras = CameraHub(self.mesh)
+        self.cam_watchers = set()   # peers receiving my camera
+        self._cam_subs = set()      # peers whose camera I receive
 
         self._timer = QTimer(self, interval=1000, timeout=self._tick)
 
@@ -97,6 +110,8 @@ class Core(QObject):
     def shutdown(self):
         self.preview.stop()
         self.sender.stop()
+        self.camera.stop()
+        self.cameras.stop()
         self.viewer.stop()
         self.voice.shutdown()
         self.mesh.stop()
@@ -105,7 +120,20 @@ class Core(QObject):
     def _my_state(self):
         return {"voice": self.my_voice, "muted": bool(self.s["muted"]),
                 "deafened": bool(self.s["deafened"]), "streaming": self.sender.running,
-                "speaking": self.voice.gate}
+                "speaking": self.voice.gate, "status": self.my_status(), "camera": self.camera.running}
+
+    def my_status(self):
+        chosen = self.s.get("status") or "online"
+        return "idle" if chosen == "online" and self._auto_idle else chosen
+
+    def set_status(self, status):
+        self.s["status"] = status
+        self.s.save()
+        self._broadcast_state()
+        self.members_changed.emit()
+
+    def do_not_disturb(self):
+        return self.my_status() == "dnd"
 
     @staticmethod
     def _verify(author, data, sig):
@@ -136,7 +164,11 @@ class Core(QObject):
             name = (prof or {}).get("name") or hello.get("name") or "Участник"
             color = (prof or {}).get("color") or hello.get("color") or "#5865f2"
         state = self._my_state() if uid == self.me else self.states.get(uid, {})
-        return {"uid": uid, "name": name, "color": color, "online": uid in self.online(),
+        online = uid in self.online()
+        status = (state.get("status") or "online") if online else "offline"
+        if status not in ("online", "idle", "dnd", "offline"):
+            status = "online"
+        return {"uid": uid, "name": name, "color": color, "online": online, "status": status,
                 "state": state, "avatar": self.avatar_path(uid)}
 
     def avatar_path(self, uid):
@@ -347,6 +379,8 @@ class Core(QObject):
 
     def _on_peer_down(self, uid):
         self._set_state(uid, None)
+        self.cam_watchers.discard(uid)
+        self.camera.set_viewers(self._cam_watcher_uids())
         self.watchers.discard(uid)
         self.sender.set_viewers(self._watcher_uids())
         if self.viewer.uid == uid:
@@ -420,6 +454,9 @@ class Core(QObject):
                 return                   # only the other person writes in our conversation
             self.typing.setdefault(cid, {})[uid] = time.monotonic() + TYPING_TTL
             self.typing_changed.emit(cid)
+        elif t == "cam":
+            (self.cam_watchers.add if msg.get("on") else self.cam_watchers.discard)(uid)
+            self.camera.set_viewers(self._cam_watcher_uids())
         elif t == "watch":
             (self.watchers.add if msg.get("on") else self.watchers.discard)(uid)
             self.sender.set_viewers(self._watcher_uids())
@@ -491,6 +528,8 @@ class Core(QObject):
         return bool(name and re.search(rf"@({name}|все|everyone)(?!\w)", text, re.IGNORECASE))
 
     def _maybe_notify(self, msg, store):
+        if self.do_not_disturb():                # «Не беспокоить»: no pop-ups, no sounds
+            return
         text = store.text_of(msg)
         personal = msg["ch"].startswith("dm:")          # a direct message counts as a mention
         if self.s["notify_mentions_only"] and not (personal or self.mentions_me(text)):
@@ -567,6 +606,14 @@ class Core(QObject):
         return [u for u, exp in self.typing.get(cid, {}).items() if exp > now]
 
     def _tick(self):
+        self._idle_check += 1
+        if self._idle_check >= 5:                # every 5 s: away from the keyboard?
+            self._idle_check = 0
+            idle = idle_seconds() > IDLE_AFTER
+            if idle != self._auto_idle:
+                self._auto_idle = idle
+                self._broadcast_state()
+                self.members_changed.emit()
         now = time.monotonic()
         for cid, users in list(self.typing.items()):
             if any(exp <= now for exp in users.values()):
@@ -612,6 +659,7 @@ class Core(QObject):
         if not self.my_voice:
             return
         self.stop_stream()
+        self.stop_camera()
         self.unwatch()
         self.my_voice = None
         self.voice.stop_input()
@@ -636,12 +684,72 @@ class Core(QObject):
         self._broadcast_state()
 
     def _update_voice_peers(self):
+        self._update_cameras()
         if not self.my_voice:
             self.voice.set_peers([])
             return
         connected = self.mesh.peers_map
         self.voice.set_peers([u for u, st in self.states.items()
                               if st.get("voice") == self.my_voice and u in connected])
+
+    # ── cameras ─────────────────────────────────────────────────────
+    def _update_cameras(self):
+        """Receive the camera of everyone in my voice channel who has it on; show mine too."""
+        want = set()
+        if self.my_voice:
+            connected = self.mesh.peers_map
+            want = {u for u, st in self.states.items()
+                    if st.get("voice") == self.my_voice and st.get("camera") and u in connected}
+        for uid in want - self._cam_subs:
+            self.mesh.send(uid, {"t": "cam", "on": True})
+        for uid in self._cam_subs - want:
+            self.mesh.send(uid, {"t": "cam", "on": False})
+        self._cam_subs = want
+        self.cameras.set_sources(want | ({self.me} if self.camera.running else set()))
+
+    def _cam_watcher_uids(self):
+        connected = self.mesh.peers_map
+        return [u for u in self.cam_watchers if u in connected and
+                self.states.get(u, {}).get("voice") == self.my_voice and self.my_voice]
+
+    def camera_on(self):
+        return self.camera.running
+
+    def toggle_camera(self):
+        if self.camera.running:
+            self.stop_camera()
+        else:
+            self.start_camera()
+
+    def start_camera(self):
+        if not self.my_voice:
+            self.toast.emit("Сначала зайдите в голосовой канал", "error")
+            return
+        device = self.s.get("camera_device") or ""
+        if device == TEST_CAMERA:
+            source = {"kind": "camera_test", "label": "Тестовая камера"}
+        else:
+            cams = list_cameras()
+            if device not in cams:
+                device = cams[0] if cams else ""
+            if not device:
+                self.toast.emit("Камера не найдена — подключите веб-камеру", "error")
+                return
+            source = {"kind": "camera", "device": device, "label": device}
+        if self.camera.start(source, CAMERA, self.s["stream_encoder"], ""):
+            self.camera.set_viewers(self._cam_watcher_uids())
+        self._broadcast_state()
+
+    def stop_camera(self):
+        if self.camera.stop():
+            self.cam_watchers.clear()
+            self._broadcast_state()
+
+    def _on_camera_stopped(self, reason):
+        if reason:
+            self.toast.emit(reason.replace("Трансляция прервалась", "Камера отключилась"), "error")
+        self.cam_watchers.clear()
+        self._broadcast_state()
 
     def _on_local_speaking(self, on):
         self.mesh.broadcast({"t": "spk", "on": on})
