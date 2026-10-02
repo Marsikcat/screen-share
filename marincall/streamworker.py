@@ -52,6 +52,24 @@ def _even(n):
     return max(2, int(n) // 2 * 2)
 
 
+class _WindowInput:
+    """A window through Windows.Graphics.Capture, shaped like a PyAV input for the loop below:
+    decode() yields BGRA frames, already paced to the frame rate."""
+
+    def __init__(self, hwnd, fps, stopping):
+        from . import wgc
+        self._frames = wgc.frames(hwnd, fps, stopping)
+        self._first = next(self._frames)       # fails here (OSError) if this capture can't start
+
+    def decode(self, video=0):
+        import av
+        if self._first is not None:
+            first, self._first = self._first, None
+            yield av.VideoFrame.from_ndarray(first, format="bgra")
+        for img in self._frames:
+            yield av.VideoFrame.from_ndarray(img, format="bgra")
+
+
 class Worker:
     def __init__(self, cfg):
         self.cfg = cfg
@@ -93,6 +111,14 @@ class Worker:
             opts.update(offset_x=str(src["left"]), offset_y=str(src["top"]),
                         video_size=f"{src['width']}x{src['height']}")
             return av.open("desktop", format="gdigrab", options=opts)
+        if src.get("hwnd"):
+            # by the window itself, not its title (a browser changes it with every tab), and with
+            # what games and hardware-accelerated windows really draw, even when covered
+            try:
+                return _WindowInput(src["hwnd"], fps, self.stopping)
+            except OSError as e:
+                _say(f"INFO захват окна через GDI ({e})")
+            return av.open(f"hwnd={int(src['hwnd'])}", format="gdigrab", options=opts)
         return av.open(f"title={src['title']}", format="gdigrab", options=opts)
 
     def _add_video(self, frame):
@@ -283,6 +309,11 @@ def main(arg):
     except StopIteration:
         _say("захват экрана прекратился")
         return 1
+    except Exception as e:
+        if type(e).__name__ == "WindowClosed":
+            _say(str(e))
+            return 1
+        raise
     except Exception as e:
         _say(f"{type(e).__name__}: {e}")
         return 1

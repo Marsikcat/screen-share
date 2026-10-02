@@ -100,6 +100,9 @@ class Core(QObject):
         self.cameras = CameraHub(self.mesh)
         self.cam_watchers = set()   # peers receiving my camera
         self._cam_subs = set()      # peers whose camera I receive
+        self._want_watch = None     # the screen share you chose — kept through hiccups/reconnects
+        self._heal_at = {}          # what was last reconnected when (no storm of attempts)
+        self._heal_fails = []       # times the decoder gave up, for «can't show it» after a few
 
         self._sb_pcm = {}           # custom sound file id -> samples
         self._sb_recent = {}        # uid -> times of their last soundboard sounds (rate limit)
@@ -664,7 +667,8 @@ class Core(QObject):
 
     def _set_state(self, uid, state):
         old = self.states.get(uid, {})
-        if state is None:
+        gone = state is None                    # the connection dropped — not "they stopped"
+        if gone:
             self.states.pop(uid, None)
             state = {}
         else:
@@ -676,10 +680,14 @@ class Core(QObject):
                 self.voice.play("peer_join")
             elif was_here and not is_here:
                 self.voice.play("peer_leave")
-        if old.get("streaming") and not state.get("streaming") and self.viewer.uid == uid:
-            self.viewer.stop()
-            self.toast.emit(f"{self.name_of(uid)} завершил(а) трансляцию", "info")
-            self.stream_changed.emit()
+        if old.get("streaming") and not state.get("streaming"):
+            if self._want_watch == uid and not gone:
+                self._want_watch = None             # a lost connection: we pick it up again
+            if self.viewer.uid == uid:
+                self.viewer.stop()
+                if not gone:
+                    self.toast.emit(f"{self.name_of(uid)} завершил(а) трансляцию", "info")
+                self.stream_changed.emit()
         self._update_voice_peers()
         self.voice_changed.emit()
 
@@ -740,11 +748,17 @@ class Core(QObject):
             self.typing.setdefault(cid, {})[uid] = time.monotonic() + TYPING_TTL
             self.typing_changed.emit(cid)
         elif t == "cam":
+            again = bool(msg.get("on")) and uid in self.cam_watchers
             (self.cam_watchers.add if msg.get("on") else self.cam_watchers.discard)(uid)
             self.camera.set_viewers(self._cam_watcher_uids())
+            if again:                       # asked again: their picture stalled — a fresh stream
+                self.camera.restart_viewer(uid)
         elif t == "watch":
+            again = bool(msg.get("on")) and uid in self.watchers
             (self.watchers.add if msg.get("on") else self.watchers.discard)(uid)
             self.sender.set_viewers(self._watcher_uids())
+            if again:
+                self.sender.restart_viewer(uid)
             self.stream_changed.emit()
         elif t == "pex" and isinstance(msg.get("peers"), dict):
             for u, info in list(msg["peers"].items())[:200]:
@@ -1089,6 +1103,7 @@ class Core(QObject):
                 self.members_changed.emit()
         if self._idle_check == 0 and self.downloads:
             self._check_downloads()
+        self._heal_streams()
         self._mail_clock += 1
         if self._mail_clock >= 3600:
             self._mail_clock = 0
@@ -1285,25 +1300,80 @@ class Core(QObject):
     def watch(self, uid):
         if self.viewer.uid:
             self.unwatch()
+        self._want_watch = uid
+        self._heal_fails = []
         self.viewer.watch(uid)
         self.mesh.send(uid, {"t": "watch", "on": True})
         self.stream_changed.emit()
 
     def unwatch(self):
+        self._want_watch = None
         uid = self.viewer.uid
         if uid:
             self.viewer.stop()
             self.mesh.send(uid, {"t": "watch", "on": False})
             self.stream_changed.emit()
 
+    def _rewatch(self, uid):
+        """Start over with the stream we are watching: a fresh decoder, a fresh stream from them."""
+        self.viewer.watch(uid)
+        self.viewer.stalled = True
+        self.mesh.send(uid, {"t": "watch", "on": True, "again": True})
+        self.stream_changed.emit()
+
     def _on_viewer_closed(self, uid):
-        """The stream stopped by itself (it could not be decoded, or the data ended)."""
-        if self.viewer.uid == uid:
-            self.viewer.stop()
-            self.mesh.send(uid, {"t": "watch", "on": False})
-            if self.states.get(uid, {}).get("streaming"):
-                self.toast.emit(f"Не удалось показать трансляцию {self.name_of(uid)}", "error")
-            self.stream_changed.emit()
+        """The decoder gave up on the stream (it could not be read, or the data ended)."""
+        if self.viewer.uid != uid:
+            return
+        now = time.monotonic()
+        self._heal_fails = [t for t in self._heal_fails if now - t < 60] + [now]
+        if self.states.get(uid, {}).get("streaming") and len(self._heal_fails) <= 4:
+            self._rewatch(uid)                      # try again with a fresh stream
+            return
+        self.viewer.stop()
+        self._want_watch = None
+        self.mesh.send(uid, {"t": "watch", "on": False})
+        if self.states.get(uid, {}).get("streaming"):
+            self.toast.emit(f"Не удалось показать трансляцию {self.name_of(uid)}", "error")
+        self.stream_changed.emit()
+
+    def _may_heal(self, key, every):
+        now = time.monotonic()
+        if now - self._heal_at.get(key, 0) < every:
+            return False
+        self._heal_at[key] = now
+        return True
+
+    def _heal_streams(self):
+        """Once a second: keep what we watch alive, and what others watch of ours."""
+        self.sender.heal()
+        self.camera.heal()
+        now = time.monotonic()
+        uid = self._want_watch
+        if uid:
+            st = self.states.get(uid, {})
+            if not self.my_voice:
+                self._want_watch = None
+            elif uid in self.mesh.peers_map and st.get("voice") == self.my_voice:
+                if not st.get("streaming"):
+                    self._want_watch = None
+                elif self.viewer.uid != uid:              # we lost it with the connection: back to it
+                    if self._may_heal("watch", 3):
+                        self._rewatch(uid)
+                elif now - self.viewer.last_data > 4:     # nothing comes: ask for a fresh stream
+                    if not self.viewer.stalled:
+                        self.viewer.stalled = True
+                        self.stream_changed.emit()
+                    if self._may_heal("watch", 5):
+                        self._rewatch(uid)
+                elif self.viewer.stalled and self.viewer.fed:    # it flows again
+                    self.viewer.stalled = False
+                    self.stream_changed.emit()
+        for cam in list(self._cam_subs):
+            last = self.cameras.last.get(cam, now)
+            if cam in self.mesh.peers_map and now - last > 5 and self._may_heal(("cam", cam), 6):
+                self.cameras.reset(cam)
+                self.mesh.send(cam, {"t": "cam", "on": True, "again": True})
 
     # ── files ───────────────────────────────────────────────────────
     @staticmethod

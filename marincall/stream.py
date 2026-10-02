@@ -175,8 +175,16 @@ def list_windows(exclude_titles=()):
     wins = []
     proto = ctypes.WINFUNCTYPE(ctypes.c_bool, wt.HWND, wt.LPARAM)
 
+    dwm = ctypes.windll.dwmapi
+
+    def cloaked(hwnd):
+        """Windows keeps some «visible» windows hidden (Store apps in the background, the
+        Settings host…): they show nothing, so they are no use in the list."""
+        value = wt.DWORD()
+        return dwm.DwmGetWindowAttribute(wt.HWND(hwnd), 14, ctypes.byref(value), 4) == 0 and value.value
+
     def cb(hwnd, _):
-        if user32.IsWindowVisible(hwnd) and not user32.IsIconic(hwnd):
+        if user32.IsWindowVisible(hwnd) and not user32.IsIconic(hwnd) and not cloaked(hwnd):
             n = user32.GetWindowTextLengthW(hwnd)
             if n > 0:
                 buf = ctypes.create_unicode_buffer(n + 1)
@@ -185,17 +193,45 @@ def list_windows(exclude_titles=()):
                 if title and title not in exclude_titles and title != "Program Manager":
                     pid = wt.DWORD()
                     user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
-                    wins.append({"kind": "window", "title": title, "label": title, "pid": pid.value})
+                    wins.append({"kind": "window", "title": title, "label": title, "pid": pid.value,
+                                 "hwnd": int(hwnd or 0)})
         return True
 
     user32.EnumWindows(proto(cb), 0)
     return sorted(wins, key=lambda w: w["title"].lower())
 
 
-def window_rect(title):
+def window_thumbnail(hwnd, box=(224, 126)):
+    """A small picture of a window for the source picker — what it really shows, even when it
+    is covered (Windows.Graphics.Capture); None if it cannot be had."""
+    try:
+        from . import wgc
+        cap = wgc.WindowCapture(hwnd, cursor=False)
+    except OSError:
+        return None
+    img = None
+    try:
+        deadline = time.perf_counter() + 0.6
+        while img is None and time.perf_counter() < deadline:
+            img = cap.grab()
+            if img is None:
+                time.sleep(0.02)
+    except OSError:
+        img = None
+    finally:
+        cap.close()
+    if img is None:
+        return None
+    h, w = img.shape[:2]
+    return QImage(img.data, w, h, w * 4, QImage.Format_RGB32).scaled(
+        box[0], box[1], Qt.KeepAspectRatio, Qt.SmoothTransformation)
+
+
+def window_rect(title, hwnd=None):
     """Where the shared window is right now (it can be moved or resized while streaming)."""
     user32 = ctypes.windll.user32
-    hwnd = user32.FindWindowW(None, title)
+    if not (hwnd and user32.IsWindow(wt.HWND(hwnd))):
+        hwnd = user32.FindWindowW(None, title)
     if not hwnd or not user32.IsWindowVisible(hwnd):
         return None
     r = wt.RECT()
@@ -232,9 +268,11 @@ class SourcePreview(QObject):
     def _region(source):
         if source["kind"] == "monitor":
             return {k: source[k] for k in ("left", "top", "width", "height")}
-        return window_rect(source["title"])
+        return window_rect(source["title"], source.get("hwnd"))
 
     def _loop(self, source, fps, width):
+        if source["kind"] == "window" and source.get("hwnd") and self._window_loop(source, fps, width):
+            return
         try:
             import mss
         except ImportError:
@@ -255,6 +293,32 @@ class SourcePreview(QObject):
                 except Exception:
                     pass
                 self._stop.wait(max(0.05, 1 / fps - (time.perf_counter() - t0)))
+
+
+    def _window_loop(self, source, fps, width):
+        """A shared window as viewers get it (Windows.Graphics.Capture): right even while a game
+        covers it. False if this capture is not available — then the screen region is used."""
+        try:
+            from . import wgc
+            cap = wgc.WindowCapture(source["hwnd"], cursor=False)
+        except OSError:
+            return False
+        try:
+            while not self._stop.is_set():
+                t0 = time.perf_counter()
+                if not self.paused:
+                    try:
+                        img = cap.grab()
+                    except OSError:
+                        img = None
+                    if img is not None:
+                        h, w = img.shape[:2]
+                        q = QImage(img.data, w, h, w * 4, QImage.Format_RGB32)
+                        self.frame.emit(q.scaledToWidth(width, Qt.SmoothTransformation).copy())
+                self._stop.wait(max(0.05, 1 / fps - (time.perf_counter() - t0)))
+        finally:
+            cap.close()
+        return True
 
 
 def audio_choices():
@@ -362,6 +426,21 @@ class StreamSender(QObject):
         threading.Thread(target=self._watch_proc, args=(self.proc,), daemon=True).start()
         self.encoder_label = "NVENC" if nvenc else "CPU (x264)"
         return True
+
+    def restart_viewer(self, uid):
+        """A fresh stream for one viewer (they asked again: theirs stalled or broke)."""
+        if self.running and uid in self.outs:
+            self.outs.pop(uid).close()
+            self.outs[uid] = self.mesh.open_stream(uid, header=self.header)
+
+    def heal(self):
+        """Streams that ended by themselves while their viewer is still connected: reopen."""
+        if not self.running:
+            return
+        now = time.monotonic()
+        for uid, out in list(self.outs.items()):
+            if out.failed and not out.closed and uid in self.mesh.peers_map and now - out.started > 2:
+                self.restart_viewer(uid)
 
     def set_viewers(self, uids):
         """uids of everyone watching right now: open / close their streams."""
@@ -611,6 +690,9 @@ class StreamViewer(QObject):
         self._dec = None
         self._target = (1280, 720)
         self._show = True
+        self.last_data = 0.0         # when the stream last brought anything (network thread)
+        self.stalled = False         # no data for a while: being reconnected
+        self.fed = False             # anything arrived since the last (re)start
 
     # the decoder's knobs, kept across watches
     @property
@@ -645,11 +727,15 @@ class StreamViewer(QObject):
         """Bytes of a screen share arriving over QUIC (network thread)."""
         dec = self._dec
         if uid == self.uid and dec is not None and chunk is not None:
+            self.last_data = time.monotonic()
+            self.fed = True
             dec.feed(chunk)
 
     def watch(self, uid, title=""):
         self.stop()
         self.uid = uid
+        self.fed = False
+        self.last_data = time.monotonic()      # the grace period starts now
         dec = VideoDecoder(self.voice, uid)
         dec.target, dec.show_video = self._target, self._show
         dec.frame_ready.connect(self._on_frame)
@@ -669,6 +755,7 @@ class StreamViewer(QObject):
     def stop(self):
         dec, self._dec = self._dec, None
         self.uid = None
+        self.stalled = False
         if dec is not None:
             dec.stop()
         else:
@@ -687,6 +774,7 @@ class CameraHub(QObject):
         super().__init__()
         mesh.on_camera = self._on_camera
         self.decoders = {}          # uid -> VideoDecoder
+        self.last = {}              # uid -> when their camera last brought data
         self.show_video = True
         self._paused = set()        # uids whose pictures are not wanted now (our own self-view)
 
@@ -695,20 +783,32 @@ class CameraHub(QObject):
         for uid in [u for u in self.decoders if u not in uids]:
             self.decoders.pop(uid).stop()
         for uid in uids - set(self.decoders):
-            dec = VideoDecoder(None, uid)
-            dec.fill, dec.target = True, (640, 360)
-            dec.show_video = self.show_video and uid not in self._paused
-            dec.frame_ready.connect(self._on_frame)
-            self.decoders[uid] = dec
-            dec.start()
+            self._add(uid)
+
+    def _add(self, uid):
+        self.last[uid] = time.monotonic()
+        dec = VideoDecoder(None, uid)
+        dec.fill, dec.target = True, (640, 360)
+        dec.show_video = self.show_video and uid not in self._paused
+        dec.frame_ready.connect(self._on_frame)
+        self.decoders[uid] = dec
+        dec.start()
 
     def _on_camera(self, uid, chunk):
         """Bytes of someone's camera (network thread)."""
         dec = self.decoders.get(uid)
         if dec is not None and chunk is not None:
+            self.last[uid] = time.monotonic()
             dec.feed(chunk)
 
-    feed_local = _on_camera         # our own encoded camera, for the self-view
+    feed_local = _on_camera
+
+    def reset(self, uid):
+        """A fresh decoder for one camera (its stream stalled: a new one is on the way)."""
+        dec = self.decoders.pop(uid, None)
+        if dec is not None:
+            dec.stop()
+            self._add(uid)         # our own encoded camera, for the self-view
 
     def _on_frame(self, dec):
         if self.decoders.get(dec.uid) is dec:

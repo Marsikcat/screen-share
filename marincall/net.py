@@ -191,6 +191,8 @@ class OutStream:
         self.size = 0
         self.dropped = 0
         self.closed = False
+        self.failed = False          # ended by itself (an error, the peer was not there): reopen it
+        self.started = time.monotonic()
         self.lock = threading.Lock()
         self.wake = None
 
@@ -213,6 +215,7 @@ class OutStream:
         self.wake = asyncio.Event()
         peer = self.mesh.peers_map.get(self.uid)
         if not peer:
+            self.failed = not self.closed
             return
         try:
             stream = await peer.conn.open_uni()
@@ -234,7 +237,7 @@ class OutStream:
                     await stream.write_all(b"".join(batch))
             await stream.finish()
         except Exception:
-            pass
+            self.failed = not self.closed
 
 
 class Mesh(QObject):

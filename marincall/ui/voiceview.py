@@ -1,8 +1,9 @@
 """Voice channel view (participant tiles, the stream you watch, controls) and the source picker."""
 
 import math
+import threading
 
-from PySide6.QtCore import QRectF, QSize, Qt, QTimer, Signal
+from PySide6.QtCore import QObject, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QIcon, QImage, QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtWidgets import (QButtonGroup, QComboBox, QDialog, QFrame, QGridLayout, QHBoxLayout,
                                QLabel, QListWidget, QListWidgetItem, QMenu, QSlider, QStackedWidget,
@@ -42,6 +43,18 @@ def _fit(img_w, img_h, rect):
     k = min(rect.width() / img_w, rect.height() / img_h)
     w, h = img_w * k, img_h * k
     return QRectF(rect.x() + (rect.width() - w) / 2, rect.y() + (rect.height() - h) / 2, w, h)
+
+
+def _draw_reconnecting(p, rect):
+    """Over the stream while it is being restarted (no data for a few seconds)."""
+    p.save()
+    p.fillRect(rect, QColor(0, 0, 0, 140))
+    p.setPen(QColor("white"))
+    f = p.font()
+    f.setBold(True)
+    p.setFont(f)
+    p.drawText(rect, Qt.AlignCenter, "Восстанавливаю трансляцию…")
+    p.restore()
 
 
 def _draw_frame(p, img, rect):
@@ -220,6 +233,8 @@ class Tile(QFrame):
             p.setClipPath(path)
             if watching:
                 _draw_frame(p, picture, r)
+                if self.core.viewer.stalled:
+                    _draw_reconnecting(p, r)
             else:
                 scaled = picture.scaled(self.size(), Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
                 p.drawPixmap(int((self.width() - scaled.width()) / 2),
@@ -272,6 +287,8 @@ class StreamWindow(QWidget):
         p.fillRect(self.rect(), QColor("#000000"))
         if self.frame is not None and not self.frame.isNull():
             _draw_frame(p, self.frame, QRectF(self.rect()))
+        if self.view.core.viewer.stalled:
+            _draw_reconnecting(p, QRectF(self.rect()))
 
     def resizeEvent(self, e):
         super().resizeEvent(e)
@@ -371,6 +388,8 @@ class MiniPlayer(QFrame):
         if self.frame is not None and not self.frame.isNull():
             p.setClipPath(path)
             _draw_frame(p, self.frame, r)
+            if self.core.viewer.stalled:
+                _draw_reconnecting(p, r)
             p.setClipping(False)
         p.setPen(QPen(QColor(T.c["border"]), 1))
         p.drawPath(path)
@@ -785,6 +804,12 @@ def _thumbnail(mon):
         return icons.pixmap("screen", T.c["muted"], 96, 1.2)
 
 
+class _Thumbs(QObject):
+    """Window pictures made in a background thread, handed to the picker one by one."""
+
+    ready = Signal(int, QImage)
+
+
 class SourcePicker(QDialog):
     """Pick a monitor or a window, quality and audio, then start streaming."""
 
@@ -847,10 +872,36 @@ class SourcePicker(QDialog):
         grid.setRowStretch(math.ceil(len(self.monitors) / 2), 1)    # thumbnails stay at the top
         self.pages.addWidget(screens)
         self.win_list = QListWidget()
-        for w in stream.list_windows(exclude_titles=(parent.windowTitle(),)):
-            item = QListWidgetItem(icons.icon("screen", T.c["muted"], 18), w["title"])
+        self.win_list.setViewMode(QListWidget.IconMode)            # a grid of pictures, as in Discord
+        self.win_list.setIconSize(QSize(224, 126))
+        self.win_list.setGridSize(QSize(248, 172))
+        self.win_list.setResizeMode(QListWidget.Adjust)
+        self.win_list.setMovement(QListWidget.Static)
+        self.win_list.setWordWrap(True)
+        self.win_list.setUniformItemSizes(True)
+        self.win_list.setStyleSheet(
+            f"QListWidget {{ background: transparent; border: none; }}"
+            f"QListWidget::item {{ background: {T.c['side']}; border: 2px solid transparent; border-radius: 8px;"
+            f"color: {T.c['text']}; padding: 6px; margin: 4px; }}"
+            f"QListWidget::item:selected {{ border: 2px solid {T.c['accent']}; color: {T.c['header']}; }}"
+            f"QListWidget::item:hover {{ background: {T.c['hover']}; }}")
+        self.windows = stream.list_windows(exclude_titles=(parent.windowTitle(),))
+        blank = QPixmap(224, 126)
+        blank.fill(QColor(T.c["rail"] if not T.light else T.c["active"]))
+        p = QPainter(blank)
+        p.drawPixmap((224 - 48) // 2, (126 - 48) // 2, icons.pixmap("screen", T.c["muted"], 48, 1.4))
+        p.end()
+        for w in self.windows:
+            title = w["title"] if len(w["title"]) <= 44 else w["title"][:43] + "…"
+            item = QListWidgetItem(QIcon(blank), title)
+            item.setToolTip(w["title"])
             item.setData(Qt.UserRole, w)
             self.win_list.addItem(item)
+        self.win_list.itemDoubleClicked.connect(lambda _: self._accept())
+        self._thumbs = _Thumbs()
+        self._thumbs.ready.connect(self._thumb_ready)
+        self._thumbs_started = False
+        self._closing = False
         self.pages.addWidget(self.win_list)
         v.addWidget(self.pages, 1)
 
@@ -883,9 +934,45 @@ class SourcePicker(QDialog):
         super().showEvent(e)
         theme.style_window(self)
 
+    def _load_thumbs(self):
+        """Pictures of the windows, only once the «Окна» tab is opened."""
+        if self._thumbs_started:
+            return
+        self._thumbs_started = True
+        windows, thumbs = list(self.windows), self._thumbs
+
+        def work():
+            for i, w in enumerate(windows):
+                if self._closing:
+                    return
+                img = stream.window_thumbnail(w.get("hwnd")) if w.get("hwnd") else None
+                if img is not None:
+                    try:
+                        thumbs.ready.emit(i, img)
+                    except RuntimeError:
+                        return
+        threading.Thread(target=work, daemon=True, name="window-thumbs").start()
+
+    def _thumb_ready(self, row, img):
+        item = self.win_list.item(row)
+        if item is None:
+            return
+        canvas = QPixmap(224, 126)
+        canvas.fill(Qt.transparent)
+        p = QPainter(canvas)
+        p.drawImage((224 - img.width()) // 2, (126 - img.height()) // 2, img)
+        p.end()
+        item.setIcon(QIcon(canvas))
+
+    def done(self, result):
+        self._closing = True
+        super().done(result)
+
     def _tab(self, index):
         """A window: its own sound by default (as Discord does); a screen: the whole PC."""
         self.pages.setCurrentIndex(index)
+        if index == 1:
+            self._load_thumbs()
         current = self.audio.currentData()
         swap = {stream.SYSTEM_AUDIO: stream.APP_AUDIO} if index == 1 else {stream.APP_AUDIO: stream.SYSTEM_AUDIO}
         if current in swap and self.audio.findData(swap[current]) >= 0:
