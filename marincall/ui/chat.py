@@ -190,22 +190,34 @@ class MessageList(QScrollArea):
         QTimer.singleShot(100, self._update_jump)
 
     def update_receipt(self):
-        """Conversations: «✓ Прочитано» under your newest message the other person has read."""
+        """Conversations: under your newest message — read, delivered, or still on its way."""
         if getattr(self, "_receipt", None) is not None:
             self._receipt.hide()
             self._receipt.deleteLater()
             self._receipt = None
-        if not (self.cid or "").startswith("dm:"):
+        if not (self.cid or "").startswith("dm:") or not self.shown:
             return
-        seen = self.core.seen_by_peer(self.cid)
-        mine = [(m, w) for m, w in self.shown if m["author"] == self.core.me]
-        if not mine or mine[-1][0]["ts"] > seen:
-            return                                # your latest is not read yet
-        last = self.shown[-1][0]
+        last, w = self.shown[-1]
         if last["author"] != self.core.me:
-            return                                # they replied: obviously read
-        w = mine[-1][1]
-        lb = QLabel("✓ Прочитано")
+            return                                # they replied: obviously got it
+        state = self.core.dm_delivery(self.cid, last)
+        peer = self.core.dm_peer.get(self.cid)
+        online = peer in self.core.mesh.peers_map
+        if state == "read":
+            text = "✓ Прочитано"
+        elif state == "delivered":
+            text = "✓ Доставлено"
+        elif state == "pending" and not online:
+            name = self.core.name_of(peer)
+            relays = [u for u in self.core.mesh.peers_map if u != peer and self.core._mail_peer(u)]
+            text = (f"🕓 Ждёт доставки: {name} не в сети. Участники комнаты передадут сообщение "
+                    f"в зашифрованном виде — прочитать его они не могут" if relays else
+                    f"🕓 Ждёт доставки: {name} не в сети. Уйдёт, когда в сети будет {name} "
+                    f"или кто-то из комнаты")
+        else:
+            return
+        lb = QLabel(text)
+        lb.setWordWrap(True)
         lb.setStyleSheet(f"color: {T.c['muted']}; font-size: {T.px(8)}pt; padding: 0 0 2px 72px;")
         self.col.insertWidget(self.col.indexOf(w) + 1, lb)
         self._receipt = lb
@@ -567,8 +579,11 @@ class Composer(QWidget):
         self.typing.setStyleSheet(f"color: {T.c['text']}; font-size: {T.px(8)}pt; padding-left: 4px;")
         lay.addWidget(self.typing)
 
-    def set_placeholder(self, where):
-        self.input.setPlaceholderText(f"Написать {where}" if where.startswith("@") else f"Написать в {where}")
+    def set_placeholder(self, where, offline=False):
+        text = f"Написать {where}" if where.startswith("@") else f"Написать в {where}"
+        if offline:                 # direct messages travel sealed through the room
+            text += " — не в сети, сообщение доставят через комнату"
+        self.input.setPlaceholderText(text)
 
     _restoring = False
 
@@ -811,7 +826,8 @@ class ChatView(QWidget):
                 topic = f"у собеседника версия {version} — личные сообщения дойдут, когда он обновится"
         self.h_topic.setText(topic)
         self.h_sep.setVisible(bool(topic))
-        self.composer.set_placeholder(("@" if dm else "#") + ch["name"])
+        self.composer.set_placeholder(("@" if dm else "#") + ch["name"],
+                                      offline=dm and ch["peer"] not in self.core.mesh.peers_map)
         if changed:
             self.composer.clear_reply()
             self.composer.swap_draft(old, cid)
@@ -855,6 +871,10 @@ class ChatView(QWidget):
     def _on_members(self):
         if self.cid:
             self.list.set_channel(self.cid, keep_scroll=True)
+            ch = self.core.channel(self.cid)
+            if ch and ch["kind"] == "dm":
+                self.composer.set_placeholder("@" + ch["name"],
+                                              offline=ch["peer"] not in self.core.mesh.peers_map)
 
     def _on_added(self, cid, msg):
         if cid == self.cid:

@@ -116,6 +116,50 @@ def _preview_picture():
     return path
 
 
+def _media_files():
+    """A big photo, an animated GIF and a silent video (made up, nothing from your disk)."""
+    import av
+    import numpy as np
+    from PIL import Image, ImageDraw
+    folder = Path(tempfile.mkdtemp(prefix="marincall-screens-media-"))
+    photo = folder / "закат.jpg"
+    img = Image.new("RGB", (2400, 1500))
+    px = np.zeros((1500, 2400, 3), np.uint8)
+    y = np.linspace(0, 1, 1500)[:, None]
+    px[..., 0] = (255 * (0.9 - 0.4 * y)).astype(np.uint8)
+    px[..., 1] = (255 * (0.45 - 0.3 * y)).astype(np.uint8)
+    px[..., 2] = (255 * (0.3 + 0.5 * y)).astype(np.uint8)
+    img = Image.fromarray(px)
+    d = ImageDraw.Draw(img)
+    d.ellipse((1000, 700, 1400, 1100), fill=(255, 210, 120))
+    d.rectangle((0, 1100, 2400, 1500), fill=(40, 30, 70))
+    img.save(photo, quality=88)
+    gif = folder / "котик.gif"
+    frames = []
+    for i in range(12):
+        f = Image.new("RGB", (240, 160), (88, 101, 242))
+        dd = ImageDraw.Draw(f)
+        x = 20 + i * 15
+        dd.ellipse((x, 50, x + 60, 110), fill=(255, 255, 255))
+        frames.append(f)
+    frames[0].save(gif, save_all=True, append_images=frames[1:], duration=80, loop=0)
+    clip = folder / "катка.mp4"
+    with av.open(str(clip), "w") as out:
+        vs = out.add_stream("libx264", rate=30)
+        vs.width, vs.height, vs.pix_fmt = 640, 360, "yuv420p"
+        for i in range(120):
+            fr = np.zeros((360, 640, 3), np.uint8)
+            fr[..., 1] = 60 + i
+            fr[150:210, (i * 5) % 600:(i * 5) % 600 + 40] = 255
+            f = av.VideoFrame.from_ndarray(fr, format="rgb24")
+            f.pts = i
+            for pk in vs.encode(f):
+                out.mux(pk)
+        for pk in vs.encode(None):
+            out.mux(pk)
+    return [str(photo), str(gif), str(clip)]
+
+
 def peer(role, secs):
     name, color, instance = PEERS[role]
     _env(instance)
@@ -221,6 +265,7 @@ def tour(theme_name):
     core.send_message(general, "# План на вечер\n- катка в 20:00\n- потом кино\n1. пицца\n2. чай\n"
                       "Кто убийца? ||дворецкий||")
     core.send_message(general, "", files=[str(_voice_file(12, 1))])
+    core.send_message("d:text:media", "Фото, гифка и видео с катки", files=_media_files())
     core.toast.connect(lambda text, kind: print(f"уведомление ({kind}): {text}", flush=True))
     win = MainWindow(core, app)
     win.resize(1320, 820)
@@ -249,6 +294,42 @@ def tour(theme_name):
         app.processEvents()
         ep.grab().save(str(OUT / f"{theme_name}_26b_emoji_search.png"))
         ep.deleteLater()
+
+    def media_message():
+        return next(m for m in core.store.visible_messages("d:text:media") if len(m["files"]) == 3)
+
+    def viewer():
+        from marincall.ui.media import open_viewer
+        m = media_message()
+        open_viewer(win, core, m, m["files"][0])
+
+    def viewer_zoom():
+        from marincall.ui import media
+        if media._viewer and isinstance(media._viewer.content, media.ImageCanvas):
+            media._viewer.content.zoom_at(2.5)
+
+    def viewer_video():
+        from marincall.ui import media
+        if media._viewer:
+            media._viewer.step(1)
+            media._viewer.step(1)
+
+    def viewer_play():
+        from marincall.ui import media
+        if media._viewer and isinstance(media._viewer.content, media.VideoSurface):
+            media._viewer.content.toggle()
+
+    def viewer_close():
+        from marincall.ui import media
+        if media._viewer:
+            media._viewer.close()
+
+    def dm_offline():
+        dima = next((u for u, p in core.store.profiles.items() if p["name"] == "Дима"), None)
+        if dima:
+            cid = core.open_dm(dima)
+            win.open_dm(dima)
+            core.send_message(cid, "Дима, завтра в то же время? Ответь, как появишься")
 
     def soundboard():
         from marincall.ui.soundboard import Soundboard
@@ -317,9 +398,19 @@ def tour(theme_name):
         (200, lambda: win.open_channel("d:voice:games")),
         (600, lambda: shot(win, "05_voice_empty_channel")),
         (200, lambda: win.open_channel("d:text:media")),
-        (900, lambda: shot(win, "06_chat_media")),
+        (1500, lambda: shot(win, "06_chat_media")),
+        (200, viewer),
+        (800, lambda: shot(win, "17_viewer_image")),
+        (200, viewer_zoom),
+        (500, lambda: shot(win, "17b_viewer_zoom")),
+        (200, viewer_video),
+        (1500, viewer_play),
+        (1800, lambda: shot(win, "17c_viewer_video")),
+        (200, viewer_close),
         (200, open_conversation),
         (900, lambda: shot(win, "07_direct_message")),
+        (200, dm_offline),
+        (1500, lambda: shot(win, "07b_dm_offline")),
         (200, lambda: win.open_channel(general)),
         (300, lambda: (win.show_search(), win.search.input.setText("привет"))),
         (900, lambda: shot(win, "11_search")),

@@ -526,6 +526,13 @@ def page_network(view, v):
 
 
 # ── updates ─────────────────────────────────────────────────────────
+def plural(n, one, few, many):
+    n = abs(n) % 100
+    if 10 < n < 20:
+        return many
+    return one if n % 10 == 1 else few if 2 <= n % 10 <= 4 else many
+
+
 def page_chat(view, v):
     s, core = view.s, view.core
     v.addWidget(label("Текст и файлы", "h2"))
@@ -534,6 +541,10 @@ def page_chat(view, v):
                            "и картинкой страницы. Страницу открывает ваш компьютер, когда вы отправляете "
                            "ссылку; остальные видят готовую карточку.", s.get("link_previews", True),
                            lambda on: (s.__setitem__("link_previews", on), s.save())))
+    v.addWidget(switch_row("Анимировать GIF", "GIF в чате двигаются, пока их видно и окно MarinCall "
+                           "активно. Выключите, чтобы они стояли на месте (в просмотре — всегда двигаются).",
+                           s.get("animate_gifs", True),
+                           lambda on: (s.__setitem__("animate_gifs", on), s.save())))
     v.addWidget(section("Файлы на этом компьютере", "Картинки и файлы из чатов хранятся у вас, чтобы "
                         "открываться сразу. Чужие файлы можно удалить — когда вы откроете сообщение, "
                         "файл снова скачается у участников, которые в сети. Ваши собственные файлы, "
@@ -553,7 +564,7 @@ def page_chat(view, v):
                 return
             free, kept = sizes
             info.setText(f"Можно освободить: <b>{human_size(free)}</b><br>"
-                         f"Ваши файлы, аватарки и звуки: {human_size(kept)}")
+                         f"Ваши файлы, аватарки, звуки и почта для друзей: {human_size(kept)}")
             clear.setEnabled(free > 0)
         except RuntimeError:            # the page was closed while we counted
             pass
@@ -568,6 +579,18 @@ def page_chat(view, v):
         view._cache_bridge = run_async(core.cache_size, show)
 
     clear.clicked.connect(do_clear)
+
+    count, size = core.mail_stats()
+    v.addWidget(section("Личные сообщения через комнату", "Если вы пишете тому, кто не в сети, сообщение "
+                        "запечатывается его ключом и передаётся тем, кто в сети, — они доставят его, когда "
+                        "встретят получателя. Прочитать его по дороге нельзя: видно только, кому оно и какого "
+                        "размера. Так же и вы помогаете доставлять чужие: сейчас у вас "
+                        f"{count} {plural(count, 'сообщение', 'сообщения', 'сообщений')} "
+                        f"({human_size(size)}), они удаляются после доставки или через 30 дней."))
+    v.addWidget(switch_row("Помогать доставлять чужие сообщения", "Хранить запечатанные личные сообщения "
+                           "друзей друг другу (до 16 МБ текста и 300 МБ файлов). Ваши собственные доставляются "
+                           "в любом случае.", s.get("relay_mail", True),
+                           lambda on: (s.__setitem__("relay_mail", on), s.save())))
     info.setText("Считаю…")
     clear.setEnabled(False)
     view._cache_bridge = run_async(core.cache_size, show)

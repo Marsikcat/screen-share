@@ -6,3 +6,4 @@ mss>=10
 Pillow>=10
 iroh>=1.1
 pywebrtc-audio>=0.2
+pynacl>=1.5

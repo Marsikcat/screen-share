@@ -314,6 +314,9 @@ class MainWindow(QMainWindow):
         return self.stack.currentWidget() is self.root and self.views.currentWidget() is self.chat
 
     def _stream_fullscreen(self):
+        from .media import viewer_open
+        if viewer_open():
+            return
         if self.stack.currentWidget() is self.root and self.views.currentWidget() is self.voiceview:
             self.voiceview.open_fullscreen()
 

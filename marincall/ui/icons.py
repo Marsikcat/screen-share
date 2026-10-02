@@ -87,6 +87,9 @@ PATHS.update({                    # FILL: these are painted solid, in the icon's
     "pause": '<rect x="6" y="4" width="4" height="16" rx="1" fill="FILL"/>'
              '<rect x="14" y="4" width="4" height="16" rx="1" fill="FILL"/>',
     "music": '<path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/>',
+    "chevron_left": '<path d="m15 18-6-6 6-6"/>',
+    "maximize": '<path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3'
+                'M3 16v3a2 2 0 0 0 2 2h3"/>',
     "send": '<path d="M22 2 11 13"/><path d="m22 2-7 20-4-9-9-4z"/>',
     "link": '<path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/>'
             '<path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>',

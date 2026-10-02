@@ -2,6 +2,7 @@
 
 import base64
 import hashlib
+import json
 import mimetypes
 import re
 import secrets
@@ -14,7 +15,7 @@ from pathlib import Path
 import iroh
 from PySide6.QtCore import QObject, QTimer, Signal
 
-from . import audio, linkpreview
+from . import audio, linkpreview, mailbox
 from .audio import files_label
 from .config import FILES_DIR, MAX_FILE, VERSION
 from .net import CAMERA_MAGIC, Mesh, make_invite, parse_invite
@@ -104,6 +105,12 @@ class Core(QObject):
         self._sb_recent = {}        # uid -> times of their last soundboard sounds (rate limit)
         self._sb_slot = 0
         self._embed_ready.connect(self._publish_embed)
+        # direct messages for people who are offline, carried by the rest of the room
+        self.keys = mailbox.Keys(settings["secret_key"])
+        self.mail = mailbox.Mailbox(settings.room_dir() / "mailbox.json")
+        self.mail.expire()
+        self._mail_save = QTimer(self, singleShot=True, interval=1500, timeout=self.mail.save)
+        self._mail_clock = 0
 
         self._timer = QTimer(self, interval=1000, timeout=self._tick)
 
@@ -296,6 +303,247 @@ class Core(QObject):
             return False
         return ev.get("k") != "msg" or ev.get("ch") == self.dm_cid(uid)
 
+    # ── mail: direct messages through the room while the other person is offline ──
+    def _mail_peer(self, uid):
+        """Does this peer understand mail (3.7+)?"""
+        from .updater import parse_version
+        return parse_version(self.peer_version(uid) or "0") >= (3, 7, 0)
+
+    def _mail_changed(self):
+        self._mail_save.start()
+
+    def _post_mail(self, peer, events):
+        """Seal new events of our conversation (and their files) for `peer`."""
+        files, blobs = {}, []
+        for ev in events:
+            fids = [f["id"] for f in ev.get("files") or []] if ev["k"] == "msg" else []
+            if ev["k"] == "embed" and ev.get("image"):
+                fids.append(ev["image"])
+            for fid in fids:
+                path = self.file_path(fid)
+                if not path or path.stat().st_size > mailbox.MAX_BLOB_FILE:
+                    continue                  # too big to carry: it comes when you meet
+                key, sealed = mailbox.seal_file(path.read_bytes())
+                bid = mailbox.blob_id(sealed)
+                (FILES_DIR / bid).write_bytes(sealed)
+                self.mail.blobs.add(bid)
+                files[fid] = {"blob": bid, "key": key.hex()}
+                blobs.append(bid)
+        payload = json.dumps({"v": 1, "events": events, "files": files}, ensure_ascii=False).encode()
+        if len(payload) > mailbox.MAX_BOX - 64:
+            return
+        env = mailbox.make_envelope(peer, self.keys.seal(peer, payload), blobs)
+        self.mail.add(env, own_seqs=[e["s"] for e in events])
+        self._mail_changed()
+        for uid in list(self.mesh.peers_map):
+            if self._mail_peer(uid):
+                self._send_mail(uid, [env])
+        self.seen_changed.emit(self.dm_cid(peer))
+
+    def _send_mail(self, uid, envelopes):
+        batch, size = [], 0
+        for env in envelopes:
+            batch.append(env)
+            size += len(env["box"])
+            if size > 900_000:               # well under the 4 MB line limit
+                self.mesh.send(uid, {"t": "mail", "e": batch})
+                batch, size = [], 0
+        if batch:
+            self.mesh.send(uid, {"t": "mail", "e": batch})
+
+    def _mail_hello(self, uid):
+        if not self._mail_peer(uid):
+            return
+        self._send_mail(uid, self.mail.for_uid(uid))
+        if self.mail.receipts:
+            self.mesh.send(uid, {"t": "mail_done", "r": self.mail.receipts[-1000:]})
+        ids = self.mail.ids_except(uid)
+        if ids:
+            self.mesh.send(uid, {"t": "mail_ids", "ids": ids[:5000]})
+
+    def _blob_room(self):
+        used = 0
+        for b in self.mail.blobs:
+            p = FILES_DIR / b
+            try:
+                used += p.stat().st_size
+            except OSError:
+                pass
+        return used < mailbox.MAX_BLOBS
+
+    def _on_mail(self, uid, envelopes):
+        fresh, opened = [], []
+        for env in envelopes:
+            env = mailbox.validate(env)
+            if not env:
+                continue
+            if env["to"] == self.me:
+                if self._open_mail(env, uid):
+                    opened.append(env["id"])
+            elif env["to"] != uid and self.s.get("relay_mail", True) and self.mail.add(env):
+                fresh.append(env)
+        if opened:
+            self._send_receipt(opened, uid)
+        if not fresh:
+            return
+        self._mail_changed()
+        for env in fresh:
+            if env["blobs"] and self._blob_room():
+                for b in env["blobs"]:
+                    self.mail.blobs.add(b)
+                    if not self.file_path(b):
+                        self.request_file(b, prefer=uid)
+        for other in list(self.mesh.peers_map):          # pass it on (the recipient first)
+            if other != uid and self._mail_peer(other):
+                self._send_mail(other, [e for e in fresh if e["to"] == other] +
+                                [e for e in fresh if e["to"] != other])
+
+    def _open_mail(self, env, via):
+        """An envelope for us: open it. Always True — a receipt is due either way: what we
+        cannot open, nobody else can, and it should stop travelling."""
+        if self.me in self.mail.done.get(env["id"], {}):
+            return True
+        data = self.keys.open(base64.b64decode(env["box"]))
+        try:
+            payload = json.loads(data) if data else None
+            events, files = payload["events"], payload.get("files") or {}
+        except (ValueError, KeyError, TypeError):
+            return True
+        if not isinstance(events, list) or not events or not isinstance(files, dict):
+            return True
+        sender = events[0].get("a") if isinstance(events[0], dict) else None
+        if not isinstance(sender, str) or not UID_RE.match(sender) or sender == self.me:
+            return True
+        if not all(isinstance(e, dict) and e.get("a") == sender and self._accept_dm(sender, e)
+                   for e in events):
+            return True
+        st = self.dm_store(sender)
+        new_conversation = not st.messages
+        for fid, info in list(files.items())[:20]:
+            if not (isinstance(info, dict) and mailbox.ID_RE.match(str(fid))
+                    and mailbox.ID_RE.match(str(info.get("blob", "")))
+                    and re.fullmatch(r"[0-9a-f]{64}", str(info.get("key", "")))):
+                continue
+            if not self.file_path(fid):
+                self.mail.incoming[fid] = {"blob": info["blob"], "key": info["key"], "from": sender}
+                self.mail.blobs.add(info["blob"])
+                if self.file_path(info["blob"]):
+                    self._unseal(info["blob"])
+                else:
+                    self.request_file(info["blob"], prefer=via)
+        fresh = [ev for ev in (st.add(e) for e in events) if ev]
+        for ev in fresh:
+            self._on_event(ev, live=True, store=st)
+        if fresh and new_conversation:
+            self.channels_changed.emit()
+        self._mail_changed()
+        return True
+
+    def _unseal(self, blob):
+        """One of our sealed files arrived: open it into the file it really is."""
+        path = FILES_DIR / blob
+        for fid, info in list(self.mail.incoming.items()):
+            if info["blob"] != blob:
+                continue
+            try:
+                plain = mailbox.open_file(bytes.fromhex(info["key"]), path.read_bytes())
+            except OSError:
+                return
+            if plain is not None and hashlib.sha256(plain).hexdigest()[:32] == fid:
+                tmp = FILES_DIR / f"{fid}.part"
+                tmp.write_bytes(plain)
+                tmp.replace(FILES_DIR / fid)
+                self.wanted.pop(fid, None)
+                self.file_ready.emit(fid)
+            self.mail.incoming.pop(fid, None)
+        self._drop_unused_blobs()
+        self._mail_changed()
+
+    def _send_receipt(self, ids, via):
+        old = [r for r in (self.mail.receipt_of(self.me, i) for i in ids) if r]
+        new_ids = [i for i in ids if not self.mail.receipt_of(self.me, i)]
+        fresh = []
+        if new_ids:
+            rec = mailbox.make_receipt(self.me, new_ids, self._sign)
+            self.mail.add_receipt(rec)
+            fresh.append(rec)
+            self._mail_changed()
+        if fresh:
+            for uid in list(self.mesh.peers_map):
+                if self._mail_peer(uid):
+                    self.mesh.send(uid, {"t": "mail_done", "r": fresh})
+        if old:                                   # they still carry mail we took long ago
+            self.mesh.send(via, {"t": "mail_done", "r": old})
+
+    def _on_receipts(self, uid, receipts):
+        fresh = []
+        for rec in receipts:
+            if self.mail.has_receipt(rec):
+                continue
+            rec = mailbox.check_receipt(rec, self._verify)
+            if not rec:
+                continue
+            delivered, new = self.mail.add_receipt(rec)
+            if new:
+                fresh.append(rec)
+            for own in delivered:
+                self._mark_delivered(own["to"], own["seqs"])
+        if fresh:
+            self._drop_unused_blobs()
+            self._mail_changed()
+            for other in list(self.mesh.peers_map):
+                if other != uid and self._mail_peer(other):
+                    self.mesh.send(other, {"t": "mail_done", "r": fresh})
+
+    def _drop_unused_blobs(self):
+        used = self.mail.blob_ids()
+        busy = False
+        for b in list(self.mail.blobs - used):
+            try:
+                (FILES_DIR / b).unlink(missing_ok=True)
+            except OSError:                  # still being sent to someone: try again later
+                busy = True
+                continue
+            self.mail.blobs.discard(b)
+            self.wanted.pop(b, None)
+        if busy:
+            QTimer.singleShot(30_000, self._drop_unused_blobs)
+
+    def _mark_delivered(self, uid, seqs=(), upto=None):
+        """The other person has these events of ours (seqs), or all of them up to `upto`."""
+        cid = self.dm_cid(uid)
+        d = self.s.setdefault("dm_delivered", {}).setdefault(cid, {"n": 0, "s": []})
+        n = max(int(d.get("n") or 0), int(upto or 0) if isinstance(upto, int) else 0)
+        extra = sorted({int(x) for x in (*d.get("s", []), *seqs) if int(x) > n})[-300:]
+        if n == d.get("n") and extra == d.get("s"):
+            return
+        d["n"], d["s"] = n, extra
+        self.s.save()
+        self.seen_changed.emit(cid)
+
+    def dm_delivery(self, cid, msg):
+        """My message in a conversation: "read", "delivered", "pending" (or None)."""
+        if msg["author"] != self.me or not self.dm_peer.get(cid):
+            return None
+        if msg["ts"] <= self.seen_by_peer(cid):
+            return "read"
+        d = self.s.get("dm_delivered", {}).get(cid) or {}
+        seq = int(str(msg["id"]).rsplit(":", 1)[1])
+        if seq <= int(d.get("n") or 0) or seq in d.get("s", []):
+            return "delivered"
+        return "pending"
+
+    def mail_stats(self):
+        """(envelopes kept for others, their bytes with files)."""
+        others = [e for i, e in self.mail.env.items() if i not in self.mail.own]
+        size = sum(len(e["box"]) * 3 // 4 for e in others)
+        for b in self.mail.blobs:
+            try:
+                size += (FILES_DIR / b).stat().st_size
+            except OSError:
+                pass
+        return len(others), size
+
     def _send_dm_vector(self, uid, ask):
         st = self.dms.get(uid)
         if st is not None:
@@ -390,6 +638,7 @@ class Core(QObject):
         self._send_dm_vector(uid, ask=True)
         if uid in self.dms:
             self._send_seen(self.dm_cid(uid))
+        self._mail_hello(uid)
         self.members_changed.emit()
 
     def _on_peer_down(self, uid):
@@ -446,6 +695,8 @@ class Core(QObject):
                 self.s.save()
                 self.seen_changed.emit(cid)
         elif t == "dm_vv" and isinstance(msg.get("v"), dict):
+            if uid in self.dms:
+                self._mark_delivered(uid, upto=msg["v"].get(self.me))
             # they have something for us (or we for them): open the conversation on our side too
             st = self.dm_store(uid, create=bool(msg["v"]) or uid in self.dms)
             if st is not None:
@@ -499,6 +750,19 @@ class Core(QObject):
             self._receive_chunk(uid, msg)
         elif t == "file_missing":
             self.request_file(str(msg.get("id", "")))
+        elif t == "mail" and isinstance(msg.get("e"), list):
+            self._on_mail(uid, msg["e"][:300])
+        elif t == "mail_ids" and isinstance(msg.get("ids"), list):
+            if self.s.get("relay_mail", True):
+                want = [i for i in msg["ids"][:5000] if isinstance(i, str) and mailbox.ID_RE.match(i)
+                        and i not in self.mail.env and not self.mail.done.get(i)]
+                if want:
+                    self.mesh.send(uid, {"t": "mail_get", "ids": want[:2000]})
+        elif t == "mail_get" and isinstance(msg.get("ids"), list):
+            self._send_mail(uid, [self.mail.env[i] for i in msg["ids"][:2000]
+                                  if isinstance(i, str) and i in self.mail.env])
+        elif t == "mail_done" and isinstance(msg.get("r"), list):
+            self._on_receipts(uid, msg["r"][:1000])
 
     # ── events → UI ─────────────────────────────────────────────────
     def _publish(self, event_kind, store=None, **payload):
@@ -509,7 +773,11 @@ class Core(QObject):
                 self.mesh.broadcast({"t": "ev", "e": [ev]})
             else:                      # a conversation: to that one person, never gossiped
                 peer = next(u for u, st in self.dms.items() if st is store)
-                self.mesh.send(peer, {"t": "dm_ev", "e": [ev]})
+                if peer in self.mesh.peers_map:
+                    self.mesh.send(peer, {"t": "dm_ev", "e": [ev]})
+                    self._mark_delivered(peer, [ev["s"]])
+                else:                  # offline: sealed for them, carried by whoever is online
+                    self._post_mail(peer, [ev])
             self._on_event(ev, live=True, store=store)
         return ev
 
@@ -809,6 +1077,12 @@ class Core(QObject):
                 self._auto_idle = idle
                 self._broadcast_state()
                 self.members_changed.emit()
+        self._mail_clock += 1
+        if self._mail_clock >= 3600:
+            self._mail_clock = 0
+            self.mail.expire()
+            self._drop_unused_blobs()
+            self._mail_changed()
         now = time.monotonic()
         for cid, users in list(self.typing.items()):
             if any(exp <= now for exp in users.values()):
@@ -1039,6 +1313,7 @@ class Core(QObject):
             for mid, per in list(st.embeds.items()):         # pictures of my link cards
                 if author_of(mid) == self.me:
                     keep.update(card[2]["image"] for card in list(per.values()))
+        keep.update(self.mail.blob_ids())                  # sealed mail files
         keep.discard("")
         return keep
 
@@ -1154,6 +1429,8 @@ class Core(QObject):
                 dl["path"].replace(FILES_DIR / fid)
                 self.wanted.pop(fid, None)
                 self.file_ready.emit(fid)
+                if fid in self.mail.blobs:
+                    self._unseal(fid)
                 if fid in self._avatar_files:          # someone's picture arrived
                     self._avatar_files.pop(fid)
                     self.members_changed.emit()

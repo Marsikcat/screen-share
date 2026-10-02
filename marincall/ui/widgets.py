@@ -227,6 +227,7 @@ class IconButton(QToolButton):
         self._name, self._size = name, size
         self.danger_when_checked = danger_when_checked
         self.hover_bg = None
+        self.fixed_color = None          # e.g. white on a dark picture, whatever the theme
         self.setCheckable(checkable)
         self.setToolTip(tip)
         self.setCursor(Qt.PointingHandCursor)
@@ -241,7 +242,9 @@ class IconButton(QToolButton):
         self._refresh()
 
     def _refresh(self):
-        if self.isChecked() and self.danger_when_checked:
+        if self.fixed_color:
+            color = self.fixed_color
+        elif self.isChecked() and self.danger_when_checked:
             color = T.c["red"]
         elif self._hover:
             color = T.c["header"]

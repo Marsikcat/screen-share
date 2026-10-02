@@ -107,8 +107,11 @@ DEFAULTS = {
     "read": {},                 # channel id -> last read message sort key
     "drafts": {},               # channel id -> text you started but did not send
     "dm_seen": {},              # conversation id -> how far the other person has read
+    "dm_delivered": {},         # conversation id -> {"n": contiguous seq, "s": [more seqs]} they have
+    "relay_mail": True,         # keep and pass on others' sealed direct messages
     "recent_emoji": [],         # last picked emoji, newest first
     "link_previews": True,      # fetch a title/picture card for links we send
+    "animate_gifs": True,       # GIFs move in the chat (while you can see them)
     "soundboard": True,         # play the soundboard sounds others send
     "soundboard_volume": 60,
     "window": None,

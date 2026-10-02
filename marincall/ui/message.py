@@ -10,6 +10,7 @@ from PySide6.QtGui import QBrush, QColor, QDesktopServices, QPainter, QPalette, 
 from PySide6.QtWidgets import (QFileDialog, QFrame, QHBoxLayout, QLabel, QPlainTextEdit,
                                QToolButton, QVBoxLayout, QWidget)
 
+from .. import video
 from ..audio import files_label
 from . import icons, richtext
 from .theme import T, mix
@@ -54,6 +55,11 @@ def rounded(pm, radius):
     p.drawRoundedRect(QRectF(0, 0, pm.width(), pm.height()), radius, radius)
     p.end()
     return out
+
+
+def media_is_animated(fid, path):
+    from .media import is_animated
+    return is_animated(fid, path)
 
 
 def open_file(core, meta, save=False):
@@ -221,6 +227,10 @@ class MessageWidget(QFrame):
         else:
             QDesktopServices.openUrl(QUrl(url))
 
+    def _view(self, meta):
+        from .media import open_viewer
+        open_viewer(self.window(), self.core, self.msg, meta)
+
     def _embed_picture(self, card, box):
         fid = card["image"]
         if not fid:
@@ -321,6 +331,20 @@ class MessageWidget(QFrame):
             h.addWidget(AudioCard(self.core, meta, path, open_file))
             h.addStretch(1)
             return wrap
+        if path and video.is_video(meta):
+            from .media import VideoCard
+            return VideoCard(self.core, self.msg, meta, path)
+        if meta["type"].startswith("image/") and path and media_is_animated(meta["id"], path):
+            from .media import AnimatedImage
+            gif = AnimatedImage(self.core, path)
+            gif.setToolTip(f"{meta['name']} · {human_size(meta['size'])}")
+            gif.clicked.connect(lambda: self._view(meta))
+            wrap = QWidget()
+            h = QHBoxLayout(wrap)
+            h.setContentsMargins(0, 4, 0, 4)
+            h.addWidget(gif)
+            h.addStretch(1)
+            return wrap
         if meta["type"].startswith("image/") and path:
             pm = _thumbs.get(meta["id"])
             if pm is None:
@@ -334,8 +358,8 @@ class MessageWidget(QFrame):
                 lb = QLabel()
                 lb.setPixmap(pm)
                 lb.setCursor(Qt.PointingHandCursor)
-                lb.setToolTip(f"{meta['name']} · {human_size(meta['size'])} — открыть")
-                lb.mousePressEvent = lambda e: open_file(self.core, meta)
+                lb.setToolTip(f"{meta['name']} · {human_size(meta['size'])}")
+                lb.mousePressEvent = lambda e: self._view(meta) if e.button() == Qt.LeftButton else None
                 wrap = QWidget()
                 h = QHBoxLayout(wrap)
                 h.setContentsMargins(0, 4, 0, 4)

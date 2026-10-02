@@ -15,13 +15,16 @@ VERSION_INFO = str(ROOT / "build" / "version_info.txt")
 datas = [(str(ROOT / "VERSION"), ".")]
 binaries = []
 hiddenimports = []
-# iroh and pywebrtc_audio load native libraries themselves (ctypes / pybind11); PyAV and
-# sounddevice ship theirs next to the package. collect_all picks all of that up.
-for pkg in ("iroh", "pywebrtc_audio", "sounddevice", "av"):
+# iroh and pywebrtc_audio load native libraries themselves (ctypes / pybind11); PyAV,
+# sounddevice and PyNaCl (libsodium) ship theirs next to the package. collect_all picks all of that up.
+for pkg in ("iroh", "pywebrtc_audio", "sounddevice", "av", "nacl"):
     d, b, h = collect_all(pkg)
     datas += d
     binaries += b
     hiddenimports += h
+# PyNaCl's libsodium binding is a cffi module: it needs _cffi_backend, which nothing imports
+# visibly (sounddevice happens to bring it today — don't rely on that)
+hiddenimports += ["_cffi_backend"]
 
 # Qt modules we never import, to keep the download small
 EXCLUDE_QT = ["PySide6.QtQml", "PySide6.QtQuick", "PySide6.QtQuickWidgets", "PySide6.QtPdf",

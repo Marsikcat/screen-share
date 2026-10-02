@@ -92,6 +92,8 @@ class Library(QObject):
             self.play(fid, path)
 
     def play(self, fid, path, at=None):
+        from .media import now
+        now.pause()                       # a video playing in the chat stops for the message
         if self.current and self.current != fid:
             self.pause()
         if at is not None:
