@@ -6,6 +6,7 @@ import json
 import os
 import secrets
 import sys
+import time
 from pathlib import Path
 
 APP_NAME = "MarinCall"
@@ -36,6 +37,7 @@ if not DATA.exists() and _OLD_DATA.exists():
         DATA = _OLD_DATA
 FILES_DIR = DATA / "files"
 SETTINGS_FILE = DATA / "settings.json"
+BACKUP_FILE = DATA / "settings.backup.json"     # the last good copy: the key must never be lost
 
 # Ports — both need to be open in the firewall (the screen-share encoder talks to the app over
 # a loopback TCP port the system picks).
@@ -118,15 +120,52 @@ DEFAULTS = {
 }
 
 
+def _read_json(path):
+    """The dict in `path`; None if there is no such file; ValueError if it is damaged. Waits a
+    little while another program (an antivirus, a backup tool) holds the file."""
+    for _ in range(10):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return None
+        except PermissionError:
+            time.sleep(0.3)
+            continue
+        if not isinstance(data, dict):
+            raise ValueError("not an object")
+        return data
+    raise PermissionError(f"файл занят другой программой: {path}")
+
+
+def _load_settings():
+    """settings.json — or, if it is damaged, the backup copy (the damaged file is kept aside).
+    A file we cannot read at all stops the start: carrying on would make a new identity and
+    write it over the real one."""
+    for path in (SETTINGS_FILE, BACKUP_FILE):
+        try:
+            data = _read_json(path)
+        except ValueError:
+            try:
+                path.replace(path.with_name(f"{path.stem}.damaged-{int(time.time())}.json"))
+            except OSError:
+                pass
+            continue
+        except PermissionError:
+            if path == SETTINGS_FILE:
+                raise
+            continue
+        if data:
+            return data
+    return {}
+
+
 class Settings(dict):
     """A dict that knows how to persist itself."""
 
     def __init__(self):
         super().__init__(copy.deepcopy(DEFAULTS))
-        try:
-            self.update(json.loads(SETTINGS_FILE.read_text(encoding="utf-8")))
-        except (OSError, ValueError):
-            pass
+        self._backed_up = float("-inf")
+        self.update(_load_settings())
         from .hotkeys import normalized
         first_time = self["hotkeys"] is None
         self["hotkeys"] = normalized(self["hotkeys"])
@@ -139,9 +178,22 @@ class Settings(dict):
 
     def save(self):
         DATA.mkdir(parents=True, exist_ok=True)
-        tmp = SETTINGS_FILE.with_suffix(".tmp")
-        tmp.write_text(json.dumps(self, ensure_ascii=False, indent=2), encoding="utf-8")
-        os.replace(tmp, SETTINGS_FILE)
+        text = json.dumps(self, ensure_ascii=False, indent=2)
+        targets = [SETTINGS_FILE]
+        if time.monotonic() - self._backed_up > 60:        # the backup a minute behind at most
+            targets.append(BACKUP_FILE)
+            self._backed_up = time.monotonic()
+        for target in targets:
+            tmp = target.with_suffix(".tmp")
+            for attempt in range(5):
+                try:
+                    tmp.write_text(text, encoding="utf-8")
+                    os.replace(tmp, target)
+                    break
+                except PermissionError:          # held open by someone for a moment
+                    time.sleep(0.1 * (attempt + 1))
+            else:
+                print(f"settings: could not write {target}", flush=True)
 
     def set(self, key, value):
         self[key] = value

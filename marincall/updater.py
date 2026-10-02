@@ -46,6 +46,7 @@ def _wanted(name):
 
 _installer = None      # downloaded setup, run by restart() or install_on_exit()
 _downloaded = None     # its version
+_installer_sha = None  # what it was when its signature was checked
 
 
 def _get(url, timeout=15, accept=None):
@@ -135,9 +136,10 @@ def apply(info=None):
         global _downloaded
         if not info["download"].lower().endswith(".exe"):
             raise RuntimeError("в релизе нет установщика — скачайте его со страницы релизов")
+        global _installer_sha
         path = Path(tempfile.gettempdir()) / asset_name(info["latest"])
         path.write_bytes(data)
-        _installer, _downloaded = path, info["latest"]
+        _installer, _downloaded, _installer_sha = path, info["latest"], signing.digest(data)
         return info["latest"]
     tmp = Path(tempfile.mkdtemp(prefix="marincall-update-"))
     try:
@@ -162,9 +164,18 @@ def downloaded():
     return _downloaded
 
 
+def _installer_intact():
+    """The installer waits in %TEMP%, maybe for hours: run it only if it is still the file whose
+    signature we checked (nothing swapped it in the meantime)."""
+    try:
+        return bool(_installer and _installer_sha and signing.digest(_installer) == _installer_sha)
+    except OSError:
+        return False
+
+
 def install_on_exit():
     """Run the downloaded installer as the app closes; it does not start MarinCall again."""
-    if FROZEN and _installer:
+    if FROZEN and _installer and _installer_intact():
         subprocess.Popen([str(_installer), "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART",
                           "/CLOSEAPPLICATIONS", "/NORELAUNCH=1"],
                          creationflags=getattr(subprocess, "DETACHED_PROCESS", 0))
@@ -173,7 +184,7 @@ def install_on_exit():
 
 
 def restart():
-    if FROZEN and _installer:
+    if FROZEN and _installer and _installer_intact():
         # the installer closes what's left of us, replaces the files and starts the new version
         subprocess.Popen([str(_installer), "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART",
                           "/CLOSEAPPLICATIONS"], creationflags=getattr(subprocess, "DETACHED_PROCESS", 0))

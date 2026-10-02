@@ -191,3 +191,39 @@ def test_kinds_from_newer_versions_are_kept_and_passed_on(tmp_path):
     huge["sig"] = key.sign(canonical(huge)).to_bytes().hex()
     assert c.add(huge) is None
     assert b.vector() == {}
+
+
+def test_clocks_in_the_future_do_not_break_the_chat(tmp_path):
+    import time as _time
+    from marincall.store import canonical
+    a, key = make_store(tmp_path / "a")
+    b, _ = make_store(tmp_path / "b")
+    seq = 1
+    for ts in (int(_time.time() * 1000) + 10 * 365 * 86400 * 1000, -5, 10 ** 18):
+        ev = {"id": f"{a.me}:{seq}", "a": a.me, "s": seq, "k": "msg", "ts": ts, "ch": "d:text:general",
+              "text": f"#{seq}", "reply": None, "files": []}
+        ev["sig"] = key.sign(canonical(ev)).to_bytes().hex()
+        assert b.add(ev)
+        seq += 1
+    now = int(_time.time() * 1000)
+    for m in b.visible_messages("d:text:general"):
+        assert 86400 * 1000 < m["ts"] <= now + 61_000            # shown as "now", not years ahead
+    assert b.events[f"{a.me}:1"]["ts"] > now + 86400 * 1000      # the signed event is untouched
+
+
+def test_settings_survive_a_damaged_file(monkeypatch):
+    from marincall import config
+    s = config.Settings()
+    uid, key = s.uid, s["secret_key"]
+    s.save()
+    assert config.BACKUP_FILE.exists()
+    config.SETTINGS_FILE.write_text("{ broken", encoding="utf-8")      # a crash mid-write, a bad disk
+    again = config.Settings()
+    assert again.uid == uid and again["secret_key"] == key                # restored from the backup
+    assert list(config.DATA.glob("settings.damaged-*.json"))            # and the damaged one kept
+    def locked(*a, **k):
+        raise PermissionError("locked")
+    monkeypatch.setattr(config.Path, "read_text", locked)
+    monkeypatch.setattr(config.time, "sleep", lambda s: None)
+    with pytest.raises(PermissionError):                                 # never a new identity instead
+        config.Settings()

@@ -79,7 +79,9 @@ class MessageCard(QFrame):
             v.addWidget(label(audio.files_label(msg["files"]), "hint"))
         else:
             for f in msg["files"][:3]:
-                v.addWidget(label(f"📎 {f['name']}", "hint"))
+                name = label(f"📎 {f['name']}", "hint")
+                name.setTextFormat(Qt.PlainText)
+                v.addWidget(name)
 
     def mouseReleaseEvent(self, e):
         if e.button() == Qt.LeftButton:

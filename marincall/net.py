@@ -266,6 +266,14 @@ class Mesh(QObject):
         self.on_camera = None        # the same for camera streams
         self._stopped = threading.Event()
         self._ifaces, self._neighbours = [], []
+        self._tasks = set()          # the loop keeps only weak references to tasks: we hold them
+
+    def _spawn(self, coro):
+        """create_task that cannot be garbage-collected halfway through."""
+        task = asyncio.get_running_loop().create_task(coro)
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+        return task
 
     # ── lifecycle ───────────────────────────────────────────────────
     def start(self):
@@ -316,7 +324,7 @@ class Mesh(QObject):
         if internet:
             self.relays = iroh.RelayMode.default_mode().relay_map().urls()
         self._refresh_addr()
-        tasks = [asyncio.create_task(self._accept_loop()), asyncio.create_task(self._maintain())]
+        tasks = [self._spawn(self._accept_loop()), self._spawn(self._maintain())]
         while self.running:
             await asyncio.sleep(0.5)
         for t in tasks:
@@ -370,34 +378,49 @@ class Mesh(QObject):
                 break
             if inc is None:
                 break
-            asyncio.create_task(self._incoming(inc))
+            self._spawn(self._incoming(inc))
 
     async def _incoming(self, inc):
+        conn = None
         try:
             conn = await asyncio.wait_for((await inc.accept()).connect(), 15)
             bi = await asyncio.wait_for(conn.accept_bi(), 15)
             await self._handshake(conn, bi.send(), bi.recv(), outgoing=False)
         except Exception:
-            pass
+            self._drop(conn)
 
     def dial(self, uid, relay=None, addrs=()):
         """Thread-safe: try to connect to a peer we know by key (+ hints where it might be)."""
         if self.loop and self.running:
-            asyncio.run_coroutine_threadsafe(self._dial(uid, relay, list(addrs)), self.loop)
+            self.loop.call_soon_threadsafe(self._spawn, self._dial(uid, relay, list(addrs)))
 
     async def _dial(self, uid, relay, addrs):
         if uid == self.me or uid in self.dialing or uid in self.peers_map or not self.ep:
             return
         self.dialing.add(uid)
+        conn = None
         try:
             target = iroh.EndpointAddr(iroh.EndpointId.from_bytes(bytes.fromhex(uid)), relay, addrs)
             conn = await asyncio.wait_for(self.ep.connect(target, ALPN), 20)
             bi = await conn.open_bi()
             await self._handshake(conn, bi.send(), bi.recv(), outgoing=True)
         except Exception:
-            pass
+            self._drop(conn)
         finally:
             self.dialing.discard(uid)
+
+    def _drop(self, conn):
+        """A connection that never became a peer (no hello in time, an error): close it now
+        rather than let it linger until QUIC's idle timeout."""
+        if conn is None:
+            return
+        with self.lock:
+            if any(p.conn is conn for p in self.peers_map.values()):
+                return
+        try:
+            conn.close(1, b"handshake failed")
+        except Exception:
+            pass
 
     async def _handshake(self, conn, send, recv, outgoing):
         peer = Peer(conn, send, recv, outgoing)
@@ -423,7 +446,7 @@ class Mesh(QObject):
                 old.replaced = True
                 old.conn.close(0, b"duplicate")
             self.peers_map[peer.uid] = peer
-        peer.tasks = [asyncio.create_task(c) for c in (
+        peer.tasks = [self._spawn(c) for c in (
             self._read_lines(peer, reader), self._write_lines(peer),
             self._read_datagrams(peer), self._accept_streams(peer))]
         self.peer_up.emit(peer.uid)
@@ -487,7 +510,7 @@ class Mesh(QObject):
                 rs = await peer.conn.accept_uni()
             except Exception:
                 break
-            asyncio.create_task(self._read_stream(peer.uid, rs))
+            self._spawn(self._read_stream(peer.uid, rs))
 
     async def _read_stream(self, uid, rs):
         handler = None
@@ -537,10 +560,16 @@ class Mesh(QObject):
     def open_stream(self, uid, header=b""):
         out = OutStream(self, uid, header=header)
         if self.loop:
-            asyncio.run_coroutine_threadsafe(out.run(), self.loop)
+            self.loop.call_soon_threadsafe(self._spawn, out.run())
         return out
 
     # ── queries ─────────────────────────────────────────────────────
+    def hello(self, uid):
+        """What a connected peer said about itself ({} if not connected) — cheap, unlike peers(),
+        which also asks each connection for its path."""
+        peer = self.peers_map.get(uid)
+        return peer.hello if peer is not None else {}
+
     def peers(self):
         with self.lock:
             return {u: {**p.hello, **p.path()} for u, p in self.peers_map.items()}
@@ -569,7 +598,7 @@ class Mesh(QObject):
                     continue
                 # the lower key dials first; the other side steps in if that fails (one-way firewall)
                 if self.me < uid or now - info["first"] > 6:
-                    asyncio.create_task(self._dial(uid, None, [f"{info['ip']}:{info['port']}"]))
+                    self._spawn(self._dial(uid, None, [f"{info['ip']}:{info['port']}"]))
             if self.s["network_mode"] != "internet":
                 continue
             room = self.s.room_id()
@@ -583,7 +612,7 @@ class Mesh(QObject):
                 relays = [info.get("relay")] + [r for r in self.relays if r != info.get("relay")]
                 relay = relays[idx % len(relays)] if relays else None
                 self.attempts[uid] = (now, idx + 1)
-                asyncio.create_task(self._dial(uid, relay, info.get("addrs") or []))
+                self._spawn(self._dial(uid, relay, info.get("addrs") or []))
 
     # ── LAN discovery (plain UDP broadcast, works over Radmin VPN too) ──
     def _announcement(self):

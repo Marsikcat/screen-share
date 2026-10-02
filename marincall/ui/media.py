@@ -439,6 +439,7 @@ class VideoCard(QWidget):
         if not info or not info.get("thumb"):
             from .message import open_file
             card = QLabel(f"🎬  {self.meta['name']} · {human_size(self.meta['size'])} — открыть")
+            card.setTextFormat(Qt.PlainText)
             card.setCursor(Qt.PointingHandCursor)
             card.setStyleSheet(f"background: {T.c['side']}; color: {T.c['link']}; border-radius: 8px;"
                                f"padding: 12px;")
@@ -653,6 +654,8 @@ class MediaViewer(QWidget):
         from .message import when
         self.who.setText(member["name"])
         self.what.setText(f"{when(msg['ts'])} · {meta['name']} · {human_size(meta['size'])}")
+        for lb in (self.who, self.what):
+            lb.setTextFormat(Qt.PlainText)            # a file name is just text
         self.counter.setText(f"{self.index + 1} из {len(self.items)}" if len(self.items) > 1 else "")
         self.b_prev.setVisible(self.index > 0)
         self.b_next.setVisible(self.index < len(self.items) - 1)

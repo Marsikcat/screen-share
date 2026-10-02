@@ -47,6 +47,21 @@ def now_ms():
     return int(time.time() * 1000)
 
 
+EARLIEST = 2 * 86400 * 1000         # 3 Jan 1970: Windows cannot format times before the epoch
+
+
+def shown_ts(ts):
+    """Where a message sits in the chat. The author's clock decides — unless it is in the future
+    (a PC with a wrong date): then it is "now", or such a message would stick to the bottom
+    forever and push the «read» mark past every real message after it."""
+    return max(EARLIEST, min(ts, now_ms() + 60_000))
+
+
+def display_name(name):
+    """Names people choose are shown as text: Qt would render «<b>…</b>» in a label as markup."""
+    return str(name).replace("<", "‹").replace(">", "›")
+
+
 def author_of(event_id):
     return str(event_id).split(":", 1)[0]
 
@@ -255,7 +270,7 @@ class Store:
         self.seqs.setdefault(ev["a"], set()).add(ev["s"])
         k, v = ev["k"], (ev["ts"], ev["id"])
         if k == "msg":
-            msg = {"id": ev["id"], "author": ev["a"], "ch": ev["ch"], "ts": ev["ts"],
+            msg = {"id": ev["id"], "author": ev["a"], "ch": ev["ch"], "ts": shown_ts(ev["ts"]),
                    "text": ev["text"], "reply": ev["reply"], "files": ev["files"]}
             bisect.insort(self.messages.setdefault(ev["ch"], []), msg, key=self.sort_key)
             self.msg_by_id[msg["id"]] = msg
@@ -273,13 +288,13 @@ class Store:
             if cur is None or v > cur[:2]:
                 per[ev["a"]] = (*v, ev["on"])
         elif k == "ch_new":
-            name = text_channel_name(ev["name"]) if ev["kind"] == "text" else ev["name"]
+            name = display_name(text_channel_name(ev["name"]) if ev["kind"] == "text" else ev["name"])
             self.channels[ev["id"]] = {"id": ev["id"], "kind": ev["kind"], "name": name or "канал",
                                        "topic": "", "order": ev["ts"], "deleted": False, "_v": v}
         elif k == "ch_ren":
             ch = self.channels.get(ev["target"])
             if ch and v > ch["_v"]:
-                name = text_channel_name(ev["name"]) if ch["kind"] == "text" else ev["name"]
+                name = display_name(text_channel_name(ev["name"]) if ch["kind"] == "text" else ev["name"])
                 ch["name"] = name or ch["name"]
                 ch["topic"] = ev.get("topic", ch["topic"])
                 ch["_v"] = v
@@ -290,10 +305,10 @@ class Store:
         elif k == "profile":
             cur = self.profiles.get(ev["a"])
             if cur is None or v > cur["_v"]:
-                self.profiles[ev["a"]] = {"name": ev["name"], "color": ev["color"], "_v": v}
+                self.profiles[ev["a"]] = {"name": display_name(ev["name"]), "color": ev["color"], "_v": v}
         elif k == "room":
             if v > self.room_name[:2]:
-                self.room_name = (*v, ev["name"])
+                self.room_name = (*v, display_name(ev["name"]))
         elif k == "avatar":
             cur = self.avatars.get(ev["a"])
             if cur is None or v > cur[:2]:
@@ -313,7 +328,8 @@ class Store:
                 self._sounds_removed.add(ev["target"])
                 self.sounds.pop(ev["target"], None)
             elif ev["id"] not in self._sounds_removed:
-                self.sounds[ev["id"]] = {"id": ev["id"], "name": ev["name"], "emoji": ev["emoji"] or "🔊",
+                self.sounds[ev["id"]] = {"id": ev["id"], "name": display_name(ev["name"]),
+                                         "emoji": ev["emoji"] or "🔊",
                                          "file": ev["file"], "by": ev["a"], "ts": ev["ts"]}
 
     # ── queries ─────────────────────────────────────────────────────

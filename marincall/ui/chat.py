@@ -710,7 +710,9 @@ class Composer(QWidget):
             ic = QLabel()
             ic.setPixmap(icons.pixmap("file", T.c["accent"], 18))
             h.addWidget(ic)
-            h.addWidget(QLabel(Path(p).name[:40]))
+            chip_name = QLabel(Path(p).name[:40])
+            chip_name.setTextFormat(Qt.PlainText)
+            h.addWidget(chip_name)
             rm = IconButton("x", "Убрать", 14, 22)
             rm.clicked.connect(lambda _=False, x=p: (self.files.remove(x), self._render_files()))
             h.addWidget(rm)
@@ -869,9 +871,15 @@ class ChatView(QWidget):
             self.composer.show_typing(self.core.typers(cid))
 
     def _on_members(self):
+        # someone came, went, changed their name or picture: refresh the headers only — rebuilding
+        # every message would stop a video playing in the chat and reload every picture
         if self.cid:
-            self.list.set_channel(self.cid, keep_scroll=True)
+            for _m, w in self.list.shown:
+                w.refresh_author()
+            self.list.update_receipt()
             ch = self.core.channel(self.cid)
+            if ch:
+                self.h_name.setText(ch["name"])
             if ch and ch["kind"] == "dm":
                 self.composer.set_placeholder("@" + ch["name"],
                                               offline=ch["peer"] not in self.core.mesh.peers_map)

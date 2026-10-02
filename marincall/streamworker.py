@@ -134,7 +134,6 @@ class Worker:
         from av.video.reformatter import VideoReformatter
         vs, fps = self.video, self.cfg["fps"]
         reformat = VideoReformatter()
-        convert = vs.pix_fmt != first.format.name or (first.width, first.height) != self.size
         last = -1
         frames = [first]
         stream = vin.decode(video=0)
@@ -145,7 +144,10 @@ class Worker:
                 time.sleep(max(0.0, self.t0 + (last + 1) / fps - time.perf_counter()))
             # wall-clock timestamps: the sound runs on the same clock
             pts = max(last + 1, round((time.perf_counter() - self.t0) * fps))
-            if convert:
+            # checked on every frame: a window that is resized, or a capture that changes its
+            # format, must not hand the encoder a picture of another size (that ends the stream)
+            if frame.format.name != "d3d11" and (frame.format.name != vs.pix_fmt
+                                                 or (frame.width, frame.height) != self.size):
                 frame = reformat.reformat(frame, width=self.size[0], height=self.size[1],
                                           format=vs.pix_fmt, interpolation="BICUBIC", threads=2)
             frame.pts, last = pts, pts

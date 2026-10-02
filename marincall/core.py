@@ -19,7 +19,7 @@ from . import audio, linkpreview, mailbox
 from .audio import files_label
 from .config import FILES_DIR, MAX_FILE, VERSION
 from .net import CAMERA_MAGIC, Mesh, make_invite, parse_invite
-from .store import UID_RE, Store, author_of, text_channel_name
+from .store import UID_RE, Store, author_of, display_name, text_channel_name
 from .system import idle_seconds
 
 IDLE_AFTER = 10 * 60          # s without keyboard or mouse: «Отошёл»
@@ -118,6 +118,7 @@ class Core(QObject):
         self.mesh.start()
         self.voice.start()
         self._timer.start()
+        self._drop_unused_blobs()               # sealed files left over from the last run
         if self.s.room_closed() and not self.store.room_name[2] and self.s["room"] != "Комната друга":
             self.set_room_name(self.s["room"])      # we created it: publish its name
         if not self.store.profiles.get(self.me) or \
@@ -135,6 +136,11 @@ class Core(QObject):
         self.viewer.stop()
         self.voice.shutdown()
         self.mesh.stop()
+        self._mail_save.stop()
+        try:
+            self.mail.save()                    # what was waiting for the save timer
+        except OSError:
+            pass
 
     # ── identity & presence ─────────────────────────────────────────
     def _my_state(self):
@@ -173,15 +179,15 @@ class Core(QObject):
         self.voice_changed.emit()
 
     def online(self):
-        return set(self.mesh.peers()) | {self.me}
+        return set(self.mesh.peers_map) | {self.me}
 
     def member(self, uid):
         prof = self.store.profiles.get(uid)
         if uid in (self.me, self.s.get("legacy_uid")):     # our 2.x archive id is still us
             name, color = self.s["name"], self.s["color"]
         else:
-            hello = self.mesh.peers().get(uid, {})
-            name = (prof or {}).get("name") or hello.get("name") or "Участник"
+            hello = self.mesh.hello(uid)
+            name = (prof or {}).get("name") or display_name(str(hello.get("name") or "")[:32]) or "Участник"
             color = (prof or {}).get("color") or hello.get("color") or "#5865f2"
         state = self._my_state() if uid == self.me else self.states.get(uid, {})
         online = uid in self.online()
@@ -293,7 +299,7 @@ class Core(QObject):
         return self.store.channel(cid)
 
     def peer_version(self, uid):
-        return str(self.mesh.peers().get(uid, {}).get("version") or "")
+        return str(self.mesh.hello(uid).get("version") or "")
 
     def _accept_dm(self, uid, ev):
         """Only the two of us write into our conversation, and only into it."""
@@ -625,15 +631,16 @@ class Core(QObject):
 
     # ── mesh events ─────────────────────────────────────────────────
     def _on_peer_up(self, uid):
-        hello = self.mesh.peers().get(uid, {})
+        hello = self.mesh.hello(uid)
         self._set_state(uid, hello.get("state") or {})
         self._remember(uid, {**(hello.get("addr") or {}), "name": hello.get("name")})
         self.mesh.send(uid, {"t": "vv", "v": self.store.vector()})
         # peer exchange: whoever joins through one of us learns about everyone else
         known = self.s["known_peers"] or {}
-        self.mesh.send(uid, {"t": "pex", "peers": {u: known[u] for u in self.mesh.peers()
+        self.mesh.send(uid, {"t": "pex", "peers": {u: known[u] for u in list(self.mesh.peers_map)
                                                    if u != uid and u in known}})
-        for fid in list(self.wanted):
+        for fid, asked in list(self.wanted.items()):
+            asked.discard(uid)                  # back again: it may have the file by now
             self.request_file(fid)
         self._send_dm_vector(uid, ask=True)
         if uid in self.dms:
@@ -643,6 +650,9 @@ class Core(QObject):
 
     def _on_peer_down(self, uid):
         self._set_state(uid, None)
+        for fid, dl in list(self.downloads.items()):
+            if dl.get("from") == uid:                # it was coming from them: ask someone else
+                self._restart_download(fid)
         self.cam_watchers.discard(uid)
         self.camera.set_viewers(self._cam_watcher_uids())
         self.watchers.discard(uid)
@@ -1077,6 +1087,8 @@ class Core(QObject):
                 self._auto_idle = idle
                 self._broadcast_state()
                 self.members_changed.emit()
+        if self._idle_check == 0 and self.downloads:
+            self._check_downloads()
         self._mail_clock += 1
         if self._mail_clock >= 3600:
             self._mail_clock = 0
@@ -1378,7 +1390,7 @@ class Core(QObject):
             self._private_files[fid] = only
         only = only or self._private_files.get(fid)
         asked = self.wanted.setdefault(fid, set())
-        peers = [u for u in self.mesh.peers() if u not in asked and (only is None or u == only)]
+        peers = [u for u in list(self.mesh.peers_map) if u not in asked and (only is None or u == only)]
         if prefer in peers:
             peers.remove(prefer)
             peers.insert(0, prefer)
@@ -1407,17 +1419,46 @@ class Core(QObject):
 
         threading.Thread(target=run, daemon=True).start()
 
+    def _restart_download(self, fid):
+        """A transfer that broke off: forget the half, ask the next peer that may have it —
+        or the same one again if nobody else is left (it may just have hiccupped)."""
+        dl = self.downloads.pop(fid, None)
+        if dl is not None:
+            try:
+                dl["path"].unlink(missing_ok=True)
+            except OSError:
+                pass
+            asked = self.wanted.setdefault(fid, set())
+            src = dl.get("from")
+            if src not in self.mesh.peers_map or not [u for u in self.mesh.peers_map
+                                                      if u not in asked and u != src]:
+                asked.discard(src)
+        self.request_file(fid)
+
+    def _check_downloads(self):
+        now = time.monotonic()
+        for fid, dl in list(self.downloads.items()):
+            if now - dl.get("at", now) > 30:          # the sender went quiet
+                self._restart_download(fid)
+
     def _receive_chunk(self, uid, msg):
         fid = str(msg.get("id", ""))
         if fid not in self.wanted or not re.fullmatch(r"[0-9a-f]{32}", fid):
             return
-        size = int(msg.get("size") or 0)
+        try:
+            size, off = int(msg.get("size") or 0), int(msg.get("off", -1))
+            data = base64.b64decode(msg.get("data") or "", validate=True)
+        except (TypeError, ValueError):
+            return
         if size > MAX_FILE:
             return
-        dl = self.downloads.setdefault(fid, {"path": FILES_DIR / f"{fid}.part", "got": 0})
-        if int(msg.get("off", -1)) != dl["got"]:
-            return  # out of order — a second sender; ignore
-        data = base64.b64decode(msg.get("data") or "")
+        dl = self.downloads.setdefault(fid, {"path": FILES_DIR / f"{fid}.part", "got": 0, "from": uid})
+        if dl.get("from") != uid or off != dl["got"]:
+            return  # a second sender, or out of order: ignore
+        dl["at"] = time.monotonic()
+        if dl["got"] + len(data) > MAX_FILE:
+            self._restart_download(fid)
+            return
         with open(dl["path"], "ab" if dl["got"] else "wb") as f:
             f.write(data)
         dl["got"] += len(data)

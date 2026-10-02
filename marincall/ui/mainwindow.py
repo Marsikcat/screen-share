@@ -70,6 +70,9 @@ class MainWindow(QMainWindow):
         core.channels_changed.connect(self._check_current)
         core.stream_changed.connect(self.update_mini)       # after the voice view has rebuilt
         core.voice_changed.connect(self.update_mini)
+        # Windows logging off or shutting down closes no window of ours (it lives in the tray):
+        # still write out what is waiting to be saved
+        app.aboutToQuit.connect(self._flush)
         # global hotkeys (mute, deafen, stream…) — also active while the window is focused
         self.hotkeys = HotkeyManager(self.s, lambda: QApplication.activeWindow() is not None,
                                      self._is_typing)
@@ -537,6 +540,14 @@ class MainWindow(QMainWindow):
             self.tray.hide()
         e.accept()
         self.app.quit()
+
+    def _flush(self):
+        try:
+            self.chat.save_draft()
+            self.core.mail.save()
+            self.s.save()
+        except Exception:
+            pass
 
     def quit(self):
         self.quitting = True

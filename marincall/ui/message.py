@@ -1,6 +1,7 @@
 """One chat message row (Discord layout: avatar + name on the first message of a group)."""
 
 import datetime as dt
+import re
 import shutil
 import tempfile
 from pathlib import Path
@@ -62,20 +63,48 @@ def media_is_animated(fid, path):
     return is_animated(fid, path)
 
 
+RESERVED = {"CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(1, 10)), *(f"LPT{i}" for i in range(1, 10))}
+# opening these runs them: ask first, as Discord does
+RISKY = {".exe", ".com", ".bat", ".cmd", ".ps1", ".psm1", ".vbs", ".vbe", ".js", ".jse", ".wsf", ".wsh",
+         ".msi", ".msp", ".scr", ".pif", ".lnk", ".url", ".hta", ".cpl", ".reg", ".jar", ".appx",
+         ".msix", ".application", ".gadget", ".inf", ".scf", ".dll", ".sys", ".chm", ".iso", ".img", ".vhd"}
+
+
+def safe_name(name):
+    """The sender chooses the name: keep only a plain file name (no folders, no «..», no device
+    names), so opening or saving it can never write anywhere but where we put it."""
+    name = re.split(r"[\\/]", str(name))[-1]
+    name = re.sub(r'[\x00-\x1f<>:"|?*]', "_", name).strip().strip(".").strip()
+    stem = name.split(".", 1)[0].upper()
+    if not name or stem in RESERVED:
+        name = "file_" + name
+    return name[:120]
+
+
 def open_file(core, meta, save=False):
     src = core.file_path(meta["id"])
     if not src:
         return
+    name = safe_name(meta["name"])
     if save:
-        dest, _ = QFileDialog.getSaveFileName(None, "Сохранить файл",
-                                              str(Path.home() / "Downloads" / meta["name"]))
+        dest, _ = QFileDialog.getSaveFileName(None, "Сохранить файл", str(Path.home() / "Downloads" / name))
         if dest:
             shutil.copyfile(src, dest)
         return
+    if Path(name).suffix.lower() in RISKY:
+        from PySide6.QtWidgets import QApplication
+        from .dialogs import confirm
+        if not confirm(QApplication.activeWindow(), "Запустить программу?",
+                       f"«{name}» — это программа или ярлык: открыв его, вы запустите его на своём "
+                       f"компьютере. Делайте это, только если доверяете отправителю и ждали этот файл.",
+                       ok="Запустить"):
+            return
     # stored under its hash; give the OS a copy with the real name so it picks the right app
     tmp = Path(tempfile.gettempdir()) / "MarinCall" / meta["id"]
     tmp.mkdir(parents=True, exist_ok=True)
-    target = tmp / meta["name"]
+    target = tmp / name
+    if target.resolve().parent != tmp.resolve():
+        return
     if not target.exists():
         shutil.copyfile(src, target)
     QDesktopServices.openUrl(QUrl.fromLocalFile(str(target)))
@@ -121,6 +150,8 @@ class MessageWidget(QFrame):
         self.revealed = set()                       # ||spoilers|| clicked open
         self.editing = False
         self.time_lb = None
+        self.head = None
+        self._author = None                         # (name, colour, picture) the header shows
         self.setAutoFillBackground(True)
         self._set_bg(False)
         self.lay = QHBoxLayout(self)
@@ -178,12 +209,10 @@ class MessageWidget(QFrame):
             rb.mousePressEvent = lambda e: self.reply_clicked.emit(msg["reply"])
             self.col.addWidget(rb)
         if self.first:
-            member = self.core.member(msg["author"])
-            head = QLabel(f"<span style='color:{readable(member['color'])}; font-weight:600'>"
-                          f"{richtext.html.escape(member['name'])}</span>&nbsp;&nbsp;"
-                          f"<span style='color:{c['muted']}; font-size:{T.px(8)}pt'>"
-                          f"{when(msg['ts'])}</span>")
-            self.col.addWidget(head)
+            self.head = QLabel()
+            self._author = None
+            self.refresh_author()
+            self.col.addWidget(self.head)
         if self.editing:
             self._build_editor()
         else:
@@ -219,6 +248,22 @@ class MessageWidget(QFrame):
             for emoji, users in reactions.items():
                 flow.addWidget(self._reaction_chip(emoji, users))
             self.col.addWidget(box)
+
+    def refresh_author(self):
+        """Someone changed their name, colour or picture: only the header changes."""
+        if not self.first or self.head is None:
+            return
+        member = self.core.member(self.msg["author"])
+        key = (member["name"], member["color"], member["avatar"])
+        if key == self._author:
+            return
+        self._author = key
+        c = T.c
+        self.head.setText(f"<span style='color:{readable(member['color'])}; font-weight:600'>"
+                          f"{richtext.html.escape(member['name'])}</span>&nbsp;&nbsp;"
+                          f"<span style='color:{c['muted']}; font-size:{T.px(8)}pt'>"
+                          f"{when(self.msg['ts'])}</span>")
+        self.avatar.set(member["name"], member["color"], member.get("avatar"))
 
     def _link(self, url):
         if url.startswith("spoiler:"):

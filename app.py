@@ -16,7 +16,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 
-REQUIRED = ("PySide6", "sounddevice", "av", "numpy", "iroh")
+REQUIRED = ("PySide6", "sounddevice", "av", "numpy", "iroh", "nacl")
 
 
 def _missing():
@@ -50,7 +50,13 @@ def _install_requirements():
 def _setup_logging():
     from marincall.config import DATA
     DATA.mkdir(parents=True, exist_ok=True)
-    log = open(DATA / "app.log", "a", encoding="utf-8", buffering=1)
+    path = DATA / "app.log"
+    try:
+        if path.stat().st_size > 2 * 1024 * 1024:       # keep one old log, not years of them
+            path.replace(DATA / "app.old.log")
+    except OSError:
+        pass
+    log = open(path, "a", encoding="utf-8", buffering=1)
     if sys.stdout is None or sys.stderr is None:   # pythonw has no console
         sys.stdout = sys.stderr = log
 
@@ -102,7 +108,13 @@ def main():
     server = QLocalServer()
     server.listen(key)
 
-    settings = Settings()
+    try:
+        settings = Settings()
+    except PermissionError as e:
+        _fatal(f"Не получается прочитать настройки MarinCall ({e}).\n\nПохоже, файл держит другая "
+               f"программа (антивирус, резервное копирование). Попробуйте запустить MarinCall ещё раз "
+               f"через минуту — ваш ключ и история на месте.")
+        return 1
     from marincall.ui import dialogs, theme
     theme.apply(app, settings)
     if not settings["name"]:
